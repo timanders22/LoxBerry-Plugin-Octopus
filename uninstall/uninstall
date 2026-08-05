@@ -1,0 +1,23 @@
+#!/bin/bash
+# Octopus Dynamic - uninstall
+#
+# Die Zugangsdaten werden hier ABSICHTLICH geloescht: sie sind ein Geheimnis
+# und haben auf einem System, auf dem das Plugin nicht mehr laeuft, nichts
+# verloren. Konfiguration und Historie bleiben stehen, damit eine
+# Neuinstallation nicht bei null anfaengt - LoxBerry raeumt config, data und
+# log ohnehin selbst auf, wenn der Nutzer das waehlt.
+
+ARGV3=$3
+ARGV5=$5
+PFOLDER="${ARGV3:-octopus}"
+BASE="${ARGV5:-$LBHOMEDIR}"
+if [ -z "$BASE" ] || [ ! -d "$BASE" ]; then
+    BASE=/opt/loxberry
+fi
+
+rm -f "$BASE/config/plugins/$PFOLDER/zugang.json" 2>/dev/null
+rm -rf "/tmp/$PFOLDER" 2>/dev/null
+rm -f "$BASE/data/plugins/$PFOLDER/token.json" 2>/dev/null
+
+echo "<OK> Zugangsdaten und Zwischenspeicher entfernt."
+exit 0

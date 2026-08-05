@@ -1,0 +1,39 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!--
+  Octopus Dynamic - Plugin-Symbol
+
+  Hausstandard: runde Scheibe in LoxBerry-Gruen #6dac20, Motiv in Weiss.
+  Bewusst KEIN Tintenfisch und keine fremde Wortmarke: das Motiv zeigt, was
+  das Plugin tut - Viertelstundenpreise eines Tages mit der laufenden
+  Viertelstunde hervorgehoben und einem Blitz fuer den Strombezug.
+-->
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 512 512" width="512" height="512">
+  <circle cx="256" cy="256" r="256" fill="#6dac20"/>
+
+  <!-- Grundlinie -->
+  <rect x="96" y="366" width="320" height="10" rx="5" fill="#ffffff" opacity="0.55"/>
+
+  <!-- Viertelstundenbalken: Tagesverlauf mit Tal am Vormittag -->
+  <g fill="#ffffff" opacity="0.92">
+    <rect x="104" y="286" width="20" height="80"  rx="4"/>
+    <rect x="132" y="306" width="20" height="60"  rx="4"/>
+    <rect x="160" y="326" width="20" height="40"  rx="4"/>
+    <rect x="188" y="336" width="20" height="30"  rx="4"/>
+    <rect x="216" y="316" width="20" height="50"  rx="4"/>
+    <rect x="272" y="266" width="20" height="100" rx="4"/>
+    <rect x="300" y="226" width="20" height="140" rx="4"/>
+    <rect x="328" y="186" width="20" height="180" rx="4"/>
+    <rect x="356" y="216" width="20" height="150" rx="4"/>
+    <rect x="384" y="256" width="20" height="110" rx="4"/>
+  </g>
+
+  <!-- laufende Viertelstunde: abgesetzt, damit klar ist, dass es um JETZT geht -->
+  <rect x="244" y="296" width="20" height="70" rx="4" fill="#ffffff"/>
+  <rect x="240" y="288" width="28" height="8" rx="4" fill="#ffffff"/>
+
+  <!-- Blitz: Strombezug. Bewusst links oben, damit er die hohen Balken
+       rechts nicht ueberdeckt - bei 64 Pixeln fransen ueberlagerte Formen
+       sonst zu einem Fleck zusammen. -->
+  <path d="M170 88 L112 176 L148 176 L124 248 L190 154 L150 154 L182 88 Z"
+        fill="#ffffff" opacity="0.95"/>
+</svg>

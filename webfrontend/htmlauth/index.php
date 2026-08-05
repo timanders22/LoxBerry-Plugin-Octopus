@@ -1,0 +1,1021 @@
+<?php
+/**
+ * Octopus Dynamic - Bedienoberflaeche
+ *
+ * Reiter: Einstellungen | MQTT | Einbindung in Loxone | Kostenvergleich | Test | Logdateien
+ *
+ * Die Fassungsnummer steht hier bewusst NICHT. Sie kommt aus der
+ * Plugindatenbank von LoxBerry, siehe oc_version() in oc_lib.php.
+ *
+ * WICHTIG: LBWeb::lbheader() setzt SDK-Globals (unter anderem $cfg aus
+ * general.json als stdClass) und wuerde gleichnamige Plugin-Variablen
+ * ueberschreiben - deshalb tragen hier ALLE Variablen ein oc_-Praefix.
+ *
+ * Kompatibel mit PHP 7.4 und PHP 8.x (LoxBerry 3.x/4.x).
+ */
+
+error_reporting(E_ALL & ~E_DEPRECATED & ~E_NOTICE);
+ini_set('display_errors', '1');
+
+/* ---- Bibliothek finden: installiert im html-Zweig, im Archiv daneben ---- */
+$oc_ordner = basename(__DIR__);
+foreach (array(
+    dirname(dirname(dirname(__DIR__))) . '/html/plugins/' . $oc_ordner . '/oc_lib.php',
+    dirname(__DIR__) . '/html/oc_lib.php',
+) as $oc_kand) {
+    if (is_file($oc_kand)) { require_once $oc_kand; break; }
+}
+if (!function_exists('oc_config')) {
+    echo '<p>oc_lib.php nicht gefunden. Das Plugin ist unvollstaendig installiert.</p>';
+    exit;
+}
+
+$oc_p = oc_paths();
+if ($oc_p['home'] && file_exists($oc_p['home'] . '/libs/phplib/loxberry_system.php')) {
+    require_once $oc_p['home'] . '/libs/phplib/loxberry_system.php';
+    require_once $oc_p['home'] . '/libs/phplib/loxberry_web.php';
+}
+
+$oc_gespeichert = false;
+$oc_fehler      = array();   // alle Beanstandungen sammeln, nicht nur die letzte
+$oc_hinweis     = '';
+$oc_test_titel  = '';
+$oc_test_text   = '';
+
+/* Wer einen Reiter hinzufuegt, muss diese Positivliste mitziehen - sonst
+   springt die Seite nach jedem Absenden zurueck auf Einstellungen. */
+$oc_muster = '/^tab-(settings|mqtt|loxone|costs|test|log)$/';
+$oc_tab = 'tab-settings';
+if (preg_match($oc_muster, (string) (isset($_POST['activetab']) ? $_POST['activetab'] : ''))) {
+    $oc_tab = $_POST['activetab'];
+} elseif (isset($_GET['form']) && preg_match($oc_muster, 'tab-' . $_GET['form'])) {
+    $oc_tab = 'tab-' . $_GET['form'];
+}
+
+$oc_cfg = oc_config();
+$oc_zug = oc_zugang();
+
+/* ================= Loxone-Vorlage herunterladen ================= */
+if ($_SERVER['REQUEST_METHOD'] === 'POST' && isset($_POST['download'])) {
+    $oc_art = ((string) $_POST['download'] === 'http_in') ? 'http_in' : 'mqtt_in';
+    list($oc_name, $oc_inhalt) = oc_vorlage($oc_art);
+    header('Content-Type: application/x-download');
+    header('Content-Disposition: attachment; filename=' . $oc_name);
+    header('Content-Length: ' . strlen($oc_inhalt));
+    echo $oc_inhalt;
+    exit;
+}
+
+/* ================= Protokoll leeren ================= */
+if ($_SERVER['REQUEST_METHOD'] === 'POST' && isset($_POST['clearlog'])) {
+    @mkdir(dirname($oc_p['log']), 0775, true);
+    @file_put_contents($oc_p['log'], '[' . date('Y-m-d H:i:s') . "] Protokoll geleert (Oberflaeche)\n");
+    $oc_tab = 'tab-log';
+}
+
+/* ================= Testaktionen ================= */
+if ($_SERVER['REQUEST_METHOD'] === 'POST' && isset($_POST['test'])) {
+    require_once __DIR__ . '/oc_test.php';
+    list($oc_test_titel, $oc_test_text) = oc_test_ausfuehren((string) $_POST['test']);
+    $oc_tab = 'tab-test';
+}
+
+/* ================= Zugangsdaten speichern ================= */
+if ($_SERVER['REQUEST_METHOD'] === 'POST' && isset($_POST['save_zugang'])) {
+    // Nur Steuerzeichen und Anfuehrungszeichen entfernen. Ein Filter, der
+    // alles ausser einer Positivliste wegwirft, zerstoert gueltige Eingaben.
+    $oc_saeubern = function ($s) {
+        return trim(preg_replace('/[\x00-\x1F\x7F"\']+/u', '', (string) $s));
+    };
+    $oc_mail  = $oc_saeubern(isset($_POST['z_email']) ? $_POST['z_email'] : '');
+    $oc_konto = $oc_saeubern(isset($_POST['z_konto']) ? $_POST['z_konto'] : '');
+    // Ein leeres Passwortfeld loescht NICHTS - sonst stuende irgendwann ein
+    // Benutzername ohne Passwort in der Datei, und das sieht man von aussen nicht.
+    $oc_pw = (string) (isset($_POST['z_passwort']) ? $_POST['z_passwort'] : '');
+    if ($oc_pw === '') { $oc_pw = $oc_zug['passwort']; }
+
+    if ($oc_mail !== '' && !oc_email_gueltig($oc_mail)) {
+        $oc_fehler[] = oc_t('MELDUNG.MAIL_UNGUELTIG');
+        $oc_mail = $oc_zug['email'];
+    }
+    // Die Form der Kundennummer ist bekannt: A- gefolgt von Ziffern und/oder
+    // Buchstaben. Was nicht passt, wird abgewiesen statt zurechtgebogen.
+    if ($oc_konto !== '' && !oc_konto_gueltig($oc_konto)) {
+        $oc_fehler[] = oc_t('MELDUNG.KONTO_UNGUELTIG');
+        $oc_konto = $oc_zug['konto'];
+    }
+    if (isset($_POST['zugang_loeschen'])) {
+        $oc_mail = ''; $oc_pw = ''; $oc_konto = '';
+    }
+    if (!$oc_fehler || isset($_POST['zugang_loeschen'])) {
+        if (oc_zugang_write($oc_mail, $oc_pw, $oc_konto)) {
+            $oc_hinweis = isset($_POST['zugang_loeschen'])
+                ? oc_t('MELDUNG.ZUGANG_GELOESCHT') : oc_t('MELDUNG.ZUGANG_GESPEICHERT');
+            $oc_zug = oc_zugang();
+        } else {
+            $oc_fehler[] = str_replace('%F%', oc_e($oc_p['zugang']), oc_t('MELDUNG.ZUGANG_FEHLER'));
+        }
+    }
+    $oc_tab = 'tab-settings';
+}
+
+/* ================= Einstellungen speichern ================= */
+if ($_SERVER['REQUEST_METHOD'] === 'POST' && isset($_POST['save'])) {
+    $oc_z = function ($k, $vorgabe, $min, $max) {
+        $v = str_replace(',', '.', (string) (isset($_POST[$k]) ? $_POST[$k] : ''));
+        if (!is_numeric($v)) { return $vorgabe; }
+        return max($min, min($max, (float) $v));
+    };
+    $oc_g = function ($k, $vorgabe, $min, $max) {
+        $v = (string) (isset($_POST[$k]) ? $_POST[$k] : '');
+        if (!preg_match('/^-?[0-9]+$/', trim($v))) { return $vorgabe; }
+        return max($min, min($max, (int) $v));
+    };
+    $oc_neu = $oc_cfg;
+    $oc_neu['enabled']        = isset($_POST['enabled']) ? 1 : 0;
+    $oc_neu['demo']           = isset($_POST['demo']) ? 1 : 0;
+    $oc_neu['demo_aufschlag'] = $oc_z('demo_aufschlag', 15.0, 0, 100);
+    $oc_neu['demo_vat']       = $oc_z('demo_vat', 19.0, 0, 30);
+    $oc_neu['cheap']          = $oc_z('cheap', 20.0, 0, 200);
+    $oc_neu['expensive']      = $oc_z('expensive', 35.0, 0, 400);
+    $oc_neu['window']         = $oc_g('window', 3, 1, 12);
+    if ($oc_neu['cheap'] >= $oc_neu['expensive']) {
+        $oc_fehler[] = oc_t('MELDUNG.SCHWELLEN');
+        $oc_neu['cheap'] = $oc_cfg['cheap'];
+        $oc_neu['expensive'] = $oc_cfg['expensive'];
+    }
+    $oc_neu['co2_enabled']    = isset($_POST['co2_enabled']) ? 1 : 0;
+    $oc_neu['co2_clean']      = $oc_z('co2_clean', 200, 0, 1000);
+
+    $oc_neu['fixed_price']      = $oc_z('fixed_price', 30.90, 0, 200);
+    $oc_neu['fix_grund']        = $oc_z('fix_grund', 12.90, 0, 500);
+    $oc_neu['dyn_grund']        = $oc_z('dyn_grund', 0.0, 0, 500);
+    $oc_neu['fix_sofortbonus']  = $oc_z('fix_sofortbonus', 0.0, 0, 5000);
+    $oc_neu['fix_neubonus']     = $oc_z('fix_neubonus', 0.0, 0, 5000);
+    $oc_neu['fix_neubonus_pct'] = $oc_z('fix_neubonus_pct', 0.0, 0, 100);
+    $oc_neu['fix_rabatt']       = $oc_z('fix_rabatt', 0.0, 0, 100);
+    $oc_neu['shift_kwh']        = $oc_z('shift_kwh', 3.0, 0, 100);
+
+    // Monatsverbraeuche: sobald einer gepflegt ist, ergibt ihre Summe den
+    // Jahresverbrauch (PV-Haushalte: Sommer wenig, Winter viel Zukauf).
+    $oc_neu['months'] = array();
+    $oc_msum = 0.0;
+    $oc_min = isset($_POST['months']) ? (array) $_POST['months'] : array();
+    for ($oc_i = 0; $oc_i < 12; $oc_i++) {
+        $oc_v = str_replace(',', '.', (string) (isset($oc_min[$oc_i]) ? $oc_min[$oc_i] : ''));
+        $oc_v = is_numeric($oc_v) ? max(0, min(20000, (float) $oc_v)) : 0.0;
+        $oc_neu['months'][$oc_i] = round($oc_v, 1);
+        $oc_msum += $oc_v;
+    }
+    $oc_neu['consumption'] = $oc_msum > 0
+        ? (int) round($oc_msum)
+        : $oc_g('consumption', 3500, 100, 100000);
+
+    $oc_neu['mqtt_enabled'] = isset($_POST['mqtt_enabled']) ? 1 : 0;
+    $oc_prae = preg_replace('#[^A-Za-z0-9_/-]#', '',
+        trim((string) (isset($_POST['mqtt_topic']) ? $_POST['mqtt_topic'] : '')));
+    if ($oc_prae === '') {
+        if (trim((string) (isset($_POST['mqtt_topic']) ? $_POST['mqtt_topic'] : '')) !== '') {
+            $oc_fehler[] = oc_t('MELDUNG.TOPIC_UNGUELTIG');
+        }
+        $oc_prae = 'octopus';
+    }
+    $oc_neu['mqtt_topic'] = $oc_prae;
+
+    // Token einmal erzeugen und behalten. Wer es neu wuerfelt, muss die
+    // Adressen im Miniserver anpassen - deshalb nur auf ausdruecklichen Wunsch.
+    if (isset($_POST['token_neu']) || (string) $oc_neu['aktionstoken'] === '') {
+        $oc_neu['aktionstoken'] = oc_token_erzeugen();
+        if (isset($_POST['token_neu'])) { $oc_hinweis = oc_t('MELDUNG.TOKEN_NEU'); }
+    }
+
+    $oc_std = array();
+    foreach ((array) (isset($_POST['hours']) ? $_POST['hours'] : array()) as $oc_h) {
+        $oc_h = (int) $oc_h;
+        if ($oc_h >= 0 && $oc_h <= 23) { $oc_std[] = $oc_h; }
+    }
+    sort($oc_std);
+    $oc_neu['notify'] = array(
+        'audio'      => isset($_POST['notify_audio']) ? 1 : 0,
+        'push'       => isset($_POST['notify_push']) ? 1 : 0,
+        'hours'      => $oc_std,
+        'only_cheap' => isset($_POST['only_cheap']) ? 1 : 0,
+        'negative'   => isset($_POST['neg_always']) ? 1 : 0,
+        'tomorrow'   => isset($_POST['notify_tomorrow']) ? 1 : 0,
+    );
+    $oc_modus = (string) (isset($_POST['tts_mode']) ? $_POST['tts_mode'] : 'musicserver');
+    $oc_ttsip = trim(preg_replace('/[\x00-\x1F\x7F"\']+/u', '',
+        (string) (isset($_POST['tts_ip']) ? $_POST['tts_ip'] : '')));
+    if ($oc_ttsip !== '' && !preg_match('/^[A-Za-z0-9._-]+$/', $oc_ttsip)) {
+        $oc_fehler[] = oc_t('MELDUNG.TTS_IP');
+        $oc_ttsip = (string) $oc_cfg['tts']['ip'];
+    }
+    $oc_neu['tts'] = array(
+        'mode'     => in_array($oc_modus, array('musicserver', 'ms4h', 'audioserver', 'custom'), true)
+                      ? $oc_modus : 'musicserver',
+        'ip'       => $oc_ttsip,
+        'port'     => $oc_g('tts_port', 7091, 1, 65535),
+        'zones'    => trim(preg_replace('/[^0-9,~ ]/', '',
+                      (string) (isset($_POST['tts_zones']) ? $_POST['tts_zones'] : '1'))),
+        'volume'   => $oc_g('tts_volume', 8, 1, 100),
+        'lang'     => preg_replace('/[^a-z]/', '',
+                      strtolower((string) (isset($_POST['tts_lang']) ? $_POST['tts_lang'] : 'de'))) ?: 'de',
+        'template' => trim(preg_replace('/[\x00-\x1F\x7F"]+/u', '',
+                      (string) (isset($_POST['tts_template']) ? $_POST['tts_template'] : ''))),
+    );
+    if ($oc_neu['tts']['zones'] === '') { $oc_neu['tts']['zones'] = '1'; }
+
+    if (oc_config_write($oc_neu)) {
+        $oc_gespeichert = true;
+        $oc_cfg = oc_config();
+    } else {
+        $oc_fehler[] = str_replace('%F%', oc_e($oc_p['config']), oc_t('MELDUNG.SPEICHERN_FEHLER'));
+    }
+}
+
+/* ================= Anzeige vorbereiten ================= */
+$oc_st  = oc_state();
+$oc_gw  = oc_gateway();
+$oc_mon = oc_months();
+$oc_kos = oc_cost_compare();
+$oc_hist = oc_history_read(60);
+$oc_ver = oc_version();
+$oc_hoursel = array_map('intval', (array) $oc_cfg['notify']['hours']);
+$oc_tts = $oc_cfg['tts'];
+$oc_ip  = oc_eigene_ip();
+$oc_endpunkt = 'http://' . $oc_ip . '/plugins/' . $oc_p['plugin'] . '/index.php';
+
+$oc_loglines = array();
+if (is_file($oc_p['log'])) {
+    $oc_loglines = array_slice(
+        array_reverse(file($oc_p['log'], FILE_IGNORE_NEW_LINES | FILE_SKIP_EMPTY_LINES) ?: array()),
+        0, 300);
+}
+
+function oc_n($v, $d = 2) { return number_format((float) $v, $d, ',', '.'); }
+
+/** Balkendiagramm der Viertelstundenpreise (heute und morgen). */
+function oc_chart($st)
+{
+    $rows = array();
+    foreach (array('heute', 'morgen') as $tag) {
+        if (empty($st[$tag]['slots'])) { continue; }
+        foreach ($st[$tag]['slots'] as $ts => $ct) {
+            $rows[] = array($tag, (int) $ts, (float) $ct);
+        }
+    }
+    if (!$rows) { return '<div class="sm-hilfe">' . oc_t('TEXT.CHART_LEER') . '</div>'; }
+    $w = 940; $h = 210; $x0 = 42; $y0 = 10; $pw = $w - $x0 - 10; $ph = $h - $y0 - 36;
+    $vals = array_map(function ($r) { return $r[2]; }, $rows);
+    $mx = max($vals); $mn = min(0, min($vals));
+    $span = max(0.001, $mx - $mn);
+    $bw = $pw / max(1, count($rows));
+    $jetzt = time(); $slot = $jetzt - ($jetzt % 900);
+    $svg = '<svg viewBox="0 0 ' . $w . ' ' . $h . '" role="img" '
+         . 'style="width:100%;height:auto;background:#fafafa;border:1px solid #e0e0e0;border-radius:8px;" '
+         . 'xmlns="http://www.w3.org/2000/svg">';
+    for ($i = 0; $i <= 4; $i++) {
+        $v = $mn + $span * $i / 4;
+        $y = $y0 + $ph - $ph * ($v - $mn) / $span;
+        $svg .= '<line x1="' . $x0 . '" y1="' . round($y, 1) . '" x2="' . ($x0 + $pw)
+              . '" y2="' . round($y, 1) . '" stroke="#e5e5e5"/>';
+        $svg .= '<text x="' . ($x0 - 5) . '" y="' . round($y + 3, 1)
+              . '" font-size="9" fill="#999" text-anchor="end">' . number_format($v, 0) . '</text>';
+    }
+    foreach ($rows as $i => $r) {
+        $x = $x0 + $i * $bw;
+        $y = $y0 + $ph - $ph * ($r[2] - $mn) / $span;
+        $basis = $y0 + $ph - $ph * (0 - $mn) / $span;
+        $farbe = ($r[1] === $slot) ? '#e65100' : ($r[0] === 'heute' ? '#6dac20' : '#9ccc65');
+        if ($r[2] < 0) { $farbe = '#1565c0'; }
+        $top = min($y, $basis); $hh = max(1, abs($basis - $y));
+        $svg .= '<rect x="' . round($x + 0.3, 1) . '" y="' . round($top, 1)
+              . '" width="' . round(max(0.6, $bw - 0.6), 2) . '" height="' . round($hh, 1)
+              . '" fill="' . $farbe . '"><title>' . date('d.m. H:i', $r[1]) . ' &ndash; '
+              . number_format($r[2], 2) . ' ct</title></rect>';
+        if ((int) date('G', $r[1]) % 3 === 0 && (int) date('i', $r[1]) === 0) {
+            $svg .= '<text x="' . round($x, 1) . '" y="' . ($h - 16)
+                  . '" font-size="8" fill="#999" text-anchor="middle">' . date('G', $r[1]) . '</text>';
+        }
+    }
+    $heute_n = count(array_filter($rows, function ($r) { return $r[0] === 'heute'; }));
+    $mid = $x0 + $bw * $heute_n;
+    if ($heute_n > 0 && $mid < $x0 + $pw) {
+        $svg .= '<line x1="' . round($mid, 1) . '" y1="' . $y0 . '" x2="' . round($mid, 1)
+              . '" y2="' . ($y0 + $ph) . '" stroke="#bbb" stroke-dasharray="4,3"/>';
+        $svg .= '<text x="' . round($mid + 4, 1) . '" y="' . ($y0 + 12)
+              . '" font-size="9" fill="#999">' . oc_t('TEXT.MORGEN') . '</text>';
+    }
+    $svg .= '<text x="' . $x0 . '" y="' . ($h - 3) . '" font-size="9" fill="#999">'
+          . oc_t('TEXT.CHART_LEGENDE') . '</text>';
+    return $svg . '</svg>';
+}
+
+$oc_rahmen = class_exists('LBWeb', false);
+if ($oc_rahmen) {
+    LBWeb::lbheader('Octopus Dynamic' . ($oc_ver !== '' ? ' ' . $oc_ver : ''),
+        'https://wiki.loxberry.de/', 'help.html');
+}
+?>
+<style>
+/* Hausstandard - wortgetreu aus VORLAGE_hausstandard.css.html */
+.sm-wrap { max-width: 980px; margin: 0 auto; font-family: -apple-system, 'Segoe UI', Roboto, sans-serif; color: #333; }
+.sm-wrap, .sm-wrap *, .sm-tabs, .sm-tabs * { text-shadow: none !important; }
+.sm-wrap h2 { color: #6dac20; margin: 24px 0 10px; font-size: 1.15em; border-bottom: 2px solid #e0e0e0; padding-bottom: 6px; }
+.sm-wrap h3 { color: #4f7d17; font-size: 1.0em; font-weight: 700; margin: 16px 0 2px; }
+.sm-tabs { display: flex; gap: 4px; margin: 14px 0 0; border-bottom: 2px solid #6dac20; flex-wrap: wrap; }
+.sm-tab { background: #eee; border: 1px solid #ccc; border-bottom: 0; border-radius: 8px 8px 0 0;
+          padding: 9px 18px; font-size: 0.95em; color: #444 !important; text-decoration: none; display: inline-block; }
+.sm-tab.sm-active { background: #6dac20; color: #fff !important; border-color: #6dac20; font-weight: 600; }
+.sm-feld { margin: 14px 0; }
+.sm-feld > label { display: block; font-weight: 600; font-size: 0.9em; color: #555; margin: 0 0 4px; }
+.sm-feld .ui-input-text, .sm-feld .ui-select, .sm-feld .ui-textinput { max-width: 520px; }
+.sm-feld .ui-input-text input, .sm-feld .ui-input-text textarea { font-size: 0.95em; }
+.sm-hilfe { font-size: 0.85em; color: #555; margin: 4px 0 0; max-width: 640px; }
+.sm-step { border: 1px solid #ddd; border-left: 4px solid #6dac20; background: #fafafa;
+    border-radius: 6px; padding: 12px 14px; margin: 12px 0; font-size: 0.92em; line-height: 1.5; }
+.sm-tbl { border-collapse: collapse; width: 100%; margin: 8px 0; font-size: 0.9em; }
+.sm-tbl th, .sm-tbl td { border: 1px solid #ccc; padding: 5px 7px; text-align: left; vertical-align: top; }
+.sm-tbl th { background: #eef3e6; font-weight: 600; }
+.sm-mono { font-family: Consolas, "Courier New", monospace; background: #f0f0f0;
+    padding: 1px 4px; border-radius: 3px; font-size: 0.94em; word-break: break-all; }
+.sm-pre { background: #f4f4f4; border: 1px solid #ccc; padding: 10px; font-size: 0.85em;
+    overflow: auto; margin: 8px 0; white-space: pre-wrap; }
+.sm-knopfreihe { display: flex; flex-wrap: wrap; gap: 10px; margin: 10px 0 4px; align-items: stretch; }
+.sm-knopfreihe form { margin: 0; display: flex; }
+.sm-wrap .sm-knopfreihe .sm-btn, .sm-wrap a.sm-btn, .sm-wrap button.sm-btn {
+    flex: 0 0 auto; min-width: 250px; text-align: center; display: inline-flex;
+    align-items: center; justify-content: center; line-height: 1.25;
+    padding: 10px 14px !important; border-radius: 6px !important;
+    color: #fff !important; text-decoration: none !important; font-size: 0.92em;
+    border: 0 !important; cursor: pointer; font-weight: 600 !important;
+    text-shadow: none !important; box-shadow: none !important;
+    opacity: 1 !important; margin: 0 !important; width: auto !important; }
+.sm-kacheln { display: flex; flex-wrap: wrap; gap: 10px; margin: 10px 0; }
+.sm-kachel { border: 1px solid #ddd; border-radius: 10px; padding: 10px 14px; min-width: 130px; }
+.sm-kachel b { display: block; font-size: 1.35em; color: #33691e; }
+.sm-legende { display: flex; flex-wrap: wrap; gap: 14px; margin: 10px 0 2px; font-size: 0.86em; color: #555; }
+.sm-legende span { display: inline-flex; align-items: center; gap: 6px; }
+.sm-punkt { width: 13px; height: 13px; border-radius: 3px; display: inline-block; }
+.sm-wrap .sm-btn.sm-b-lesen   { background: #6dac20 !important; }
+.sm-wrap .sm-btn.sm-b-technik { background: #546e7a !important; }
+.sm-wrap .sm-btn.sm-b-aktion  { background: #e0620d !important; }
+.sm-wrap .sm-btn.sm-b-lesen:hover,   .sm-wrap .sm-btn.sm-b-lesen:focus   { background: #5c9219 !important; color: #fff !important; }
+.sm-wrap .sm-btn.sm-b-technik:hover, .sm-wrap .sm-btn.sm-b-technik:focus { background: #435962 !important; color: #fff !important; }
+.sm-wrap .sm-btn.sm-b-aktion:hover,  .sm-wrap .sm-btn.sm-b-aktion:focus  { background: #b84f0a !important; color: #fff !important; }
+.sm-punkt.sm-b-lesen   { background: #6dac20; }
+.sm-punkt.sm-b-technik { background: #546e7a; }
+.sm-punkt.sm-b-aktion  { background: #e0620d; }
+.sm-seite { display: none; padding-top: 4px; }
+.sm-seite.sm-active { display: block; }
+.sm-hinweis { border: 1px solid #cfe3b0; background: #f2f8ea; border-radius: 6px;
+    padding: 10px 12px; margin: 12px 0; font-size: 0.9em; }
+.sm-warnung { border: 1px solid #f0c9a0; background: #fdf4ec; border-radius: 6px;
+    padding: 10px 12px; margin: 12px 0; font-size: 0.9em; }
+.sm-an  { color: #1a7f1a; font-weight: 700; }
+.sm-aus { color: #b00000; font-weight: 700; }
+/* Ergaenzungen dieses Plugins */
+.sm-reihe { display: flex; gap: 12px; flex-wrap: wrap; }
+.sm-reihe > div { flex: 1; min-width: 170px; }
+.sm-reihe > div > label { display: block; font-weight: 600; font-size: 0.88em; color: #555;
+    margin: 10px 0 4px; min-height: 2.6em; display: flex; align-items: flex-end; }
+.sm-wrap input[type=text], .sm-wrap input[type=password], .sm-wrap input[type=number],
+.sm-wrap select, .sm-wrap textarea {
+    width: 100%; padding: 8px 10px; border: 1px solid #ccc; border-radius: 6px;
+    font-size: 0.95em; box-sizing: border-box; }
+.sm-wrap input[type=checkbox] { width: 17px; height: 17px; margin: 0; vertical-align: middle; }
+.sm-stunden { display: flex; flex-wrap: wrap; gap: 4px; margin: 6px 0; }
+.sm-stunden label { display: inline-flex; align-items: center; gap: 5px; white-space: nowrap;
+    background: #f5f5f5; border: 1px solid #ddd; border-radius: 6px; padding: 5px 9px;
+    margin: 0; font-weight: 500; font-size: 0.85em; width: 96px; box-sizing: border-box; }
+.sm-stunden label:hover { background: #eef7e4; border-color: #6dac20; }
+.sm-monate { display: flex; flex-wrap: wrap; gap: 8px; margin: 6px 0; }
+.sm-monate > div { width: 110px; }
+.sm-monate label { margin: 0 0 2px; font-size: 0.8em; font-weight: 600; color: #555; min-height: 0; }
+.sm-monate input { padding: 6px 8px; font-size: 0.9em; text-align: right; }
+.sm-demo { border: 1px solid #b39ddb; background: #f3e5f5; border-radius: 6px;
+    padding: 10px 12px; margin: 12px 0; font-size: 0.92em; }
+</style>
+<div class="sm-wrap">
+
+<?php if ($oc_gespeichert) { ?>
+<div class="sm-hinweis"><b><?php echo oc_t('MELDUNG.GESPEICHERT'); ?></b>
+<?php echo oc_t('MELDUNG.GESPEICHERT_ZUSATZ'); ?></div>
+<?php } ?>
+<?php if ($oc_hinweis !== '') { ?><div class="sm-hinweis"><?php echo $oc_hinweis; ?></div><?php } ?>
+<?php foreach ($oc_fehler as $oc_f) { ?><div class="sm-warnung"><?php echo $oc_f; ?></div><?php } ?>
+
+<?php if (!empty($oc_st['demo'])) { ?>
+<div class="sm-demo"><b><?php echo oc_t('TEXT.DEMO_TITEL'); ?></b>
+<?php echo str_replace(array('%A%', '%V%'),
+    array(oc_n($oc_cfg['demo_aufschlag'], 2), oc_n($oc_cfg['demo_vat'], 1)),
+    oc_t('TEXT.DEMO_ERKLAERUNG')); ?></div>
+<?php } ?>
+
+<?php if ($oc_st['fehler'] !== '' && !$oc_st['ok']) { ?>
+<div class="sm-warnung"><b><?php echo oc_t('TEXT.KEIN_ABRUF'); ?></b>
+<?php echo oc_e(oc_fehlertext($oc_st['fehler'])); ?></div>
+<?php } elseif (!empty($oc_st['veraltet'])) { ?>
+<div class="sm-warnung"><?php echo str_replace('%F%', oc_e(oc_fehlertext($oc_st['fehler'])),
+    oc_t('TEXT.VERALTET')); ?></div>
+<?php } ?>
+
+<?php if ($oc_st['ok']) { ?>
+<div class="sm-kacheln">
+  <div class="sm-kachel"><small><?php echo oc_t('KACHEL.JETZT'); ?></small>
+    <b><?php echo oc_n($oc_st['cur'], 2); ?></b><small>ct/kWh</small></div>
+  <div class="sm-kachel"><small><?php echo oc_t('KACHEL.STUNDE'); ?></small>
+    <b><?php echo oc_n($oc_st['cur_h'], 2); ?></b><small>ct/kWh</small></div>
+  <div class="sm-kachel"><small><?php echo oc_t('KACHEL.RANG'); ?></small>
+    <b><?php echo (int) $oc_st['rank']; ?></b><small><?php echo oc_t('KACHEL.VON'); ?>
+    <?php echo (int) $oc_st['n']; ?></small></div>
+  <div class="sm-kachel"><small><?php echo oc_t('KACHEL.NIVEAU'); ?></small>
+    <b><?php echo $oc_st['level'] == 1 ? oc_t('TEXT.GUENSTIG')
+        : ($oc_st['level'] == 3 ? oc_t('TEXT.TEUER') : oc_t('TEXT.NORMAL')); ?></b>
+    <small><?php echo $oc_st['neg'] ? oc_t('TEXT.NEGATIV') : '&nbsp;'; ?></small></div>
+  <div class="sm-kachel"><small><?php echo str_replace('%N%', (int) $oc_st['fenster_len'],
+        oc_t('KACHEL.FENSTER')); ?></small>
+    <b><?php echo $oc_st['fenster']['in'] >= 0
+        ? sprintf('%02d:%02d', $oc_st['fenster']['h'], $oc_st['fenster']['m']) : '&ndash;'; ?></b>
+    <small><?php echo $oc_st['fenster']['in'] >= 0
+        ? oc_n($oc_st['fenster']['ct'], 2) . ' ct' : '&nbsp;'; ?></small></div>
+<?php if (!empty($oc_st['co2_ok'])) { ?>
+  <div class="sm-kachel"><small>CO&#8322;</small>
+    <b><?php echo (int) $oc_st['co2']; ?></b><small>g/kWh<?php
+    echo !empty($oc_st['co2_clean']) ? ' &middot; ' . oc_t('TEXT.SAUBER') : ''; ?></small></div>
+<?php } ?>
+</div>
+<div class="sm-hilfe">
+<?php echo oc_t('TEXT.HEUTE'); ?>: <?php echo oc_n($oc_st['heute']['minp'], 2); ?> ct
+<?php echo oc_t('TEXT.UM'); ?> <?php printf('%02d:%02d', $oc_st['heute']['minh'], $oc_st['heute']['minm']); ?>
+&middot; <?php echo oc_n($oc_st['heute']['maxp'], 2); ?> ct
+<?php echo oc_t('TEXT.UM'); ?> <?php printf('%02d:%02d', $oc_st['heute']['maxh'], $oc_st['heute']['maxm']); ?>
+&middot; &Oslash; <?php echo oc_n($oc_st['heute']['avg'], 2); ?> ct
+<?php if ($oc_st['tomorrow_ok']) { ?>
+&nbsp;|&nbsp; <?php echo oc_t('TEXT.MORGEN'); ?>: <?php echo oc_n($oc_st['morgen']['minp'], 2); ?> ct
+<?php echo oc_t('TEXT.UM'); ?> <?php printf('%02d:%02d', $oc_st['morgen']['minh'], $oc_st['morgen']['minm']); ?>
+&middot; <?php echo oc_n($oc_st['morgen']['maxp'], 2); ?> ct
+<?php echo oc_t('TEXT.UM'); ?> <?php printf('%02d:%02d', $oc_st['morgen']['maxh'], $oc_st['morgen']['maxm']); ?>
+&middot; &Oslash; <?php echo oc_n($oc_st['morgen']['avg'], 2); ?> ct
+<?php } else { ?>&nbsp;|&nbsp; <?php echo oc_t('TEXT.MORGEN_OFFEN'); ?><?php } ?>
+&nbsp;|&nbsp; <?php echo oc_t('TEXT.STAND'); ?>:
+<?php echo $oc_st['stand'] ? date('d.m.Y H:i', $oc_st['stand']) : '&ndash;'; ?>
+</div>
+<div style="margin-top:8px;"><?php echo oc_chart($oc_st); ?></div>
+<?php } ?>
+
+<!-- Reiterleiste: echte Links, JavaScript faengt den Klick ab. -->
+<div class="sm-tabs">
+    <a class="sm-tab" data-ziel="tab-settings" href="index.php?form=settings"><?php echo oc_t('REITER.EINSTELLUNGEN'); ?></a>
+    <a class="sm-tab" data-ziel="tab-mqtt"     href="index.php?form=mqtt"><?php echo oc_t('REITER.MQTT'); ?></a>
+    <a class="sm-tab" data-ziel="tab-loxone"   href="index.php?form=loxone"><?php echo oc_t('REITER.LOXONE'); ?></a>
+    <a class="sm-tab" data-ziel="tab-costs"    href="index.php?form=costs"><?php echo oc_t('REITER.KOSTEN'); ?></a>
+    <a class="sm-tab" data-ziel="tab-test"     href="index.php?form=test"><?php echo oc_t('REITER.TEST'); ?></a>
+    <a class="sm-tab" data-ziel="tab-log"      href="index.php?form=log"><?php echo oc_t('REITER.LOG'); ?></a>
+</div>
+
+<!-- ==================== Reiter: Einstellungen ==================== -->
+<div class="sm-seite" id="tab-settings">
+
+<h2><?php echo oc_t('EINST.H_ZUGANG'); ?></h2>
+<div class="sm-hinweis"><?php echo oc_t('EINST.ZUGANG_ERKLAERUNG'); ?></div>
+<form action="index.php" method="post" autocomplete="off">
+<input type="hidden" name="save_zugang" value="1">
+<input type="hidden" name="activetab" value="tab-settings">
+<div class="sm-reihe">
+  <div>
+    <label><?php echo oc_t('EINST.EMAIL'); ?></label>
+    <input data-role="none" type="text" name="z_email" value="<?php echo oc_e($oc_zug['email']); ?>"
+           placeholder="dein.name@mail.de">
+    <div class="sm-hilfe"><?php echo oc_t('EINST.EMAIL_HILFE'); ?></div>
+  </div>
+  <div>
+    <label><?php echo oc_t('EINST.PASSWORT'); ?></label>
+    <input data-role="none" type="password" name="z_passwort" value="" autocomplete="new-password"
+           placeholder="<?php echo $oc_zug['passwort'] !== ''
+               ? oc_e(str_replace('%N%', strlen($oc_zug['passwort']), oc_t('EINST.PW_HINTERLEGT')))
+               : oc_e(oc_t('EINST.PW_LEER')); ?>">
+    <div class="sm-hilfe"><?php echo oc_t('EINST.PASSWORT_HILFE'); ?></div>
+  </div>
+  <div>
+    <label><?php echo oc_t('EINST.KONTO'); ?></label>
+    <input data-role="none" type="text" name="z_konto" value="<?php echo oc_e($oc_zug['konto']); ?>"
+           placeholder="A-1234ABCD">
+    <div class="sm-hilfe"><?php echo oc_t('EINST.KONTO_HILFE'); ?></div>
+  </div>
+</div>
+<label style="display:inline-flex;align-items:center;gap:6px;margin-top:10px;font-weight:600;">
+  <input data-role="none" type="checkbox" name="zugang_loeschen" value="1">
+  <?php echo oc_t('EINST.ZUGANG_LOESCHEN'); ?>
+</label>
+<div class="sm-knopfreihe">
+  <button class="sm-btn sm-b-lesen" type="submit"><?php echo oc_t('EINST.ZUGANG_SPEICHERN'); ?></button>
+</div>
+<div class="sm-hilfe"><?php echo str_replace('%F%',
+    '<span class="sm-mono">' . oc_e($oc_p['zugang']) . '</span>', oc_t('EINST.ZUGANG_DATEI')); ?></div>
+</form>
+
+<form action="index.php" method="post" autocomplete="off">
+<input type="hidden" name="save" value="1">
+<input type="hidden" name="activetab" value="tab-settings">
+
+<h2><?php echo oc_t('EINST.H_BETRIEB'); ?></h2>
+<label style="display:inline-flex;align-items:center;gap:6px;font-weight:600;">
+  <input data-role="none" type="checkbox" name="enabled" <?php echo !empty($oc_cfg['enabled']) ? 'checked' : ''; ?>>
+  <?php echo oc_t('EINST.AKTIV'); ?>
+</label>
+<div class="sm-hilfe"><?php echo oc_t('EINST.AKTIV_HILFE'); ?></div>
+
+<label style="display:inline-flex;align-items:center;gap:6px;margin-top:12px;font-weight:600;">
+  <input data-role="none" type="checkbox" name="demo" <?php echo !empty($oc_cfg['demo']) ? 'checked' : ''; ?>>
+  <?php echo oc_t('EINST.DEMO'); ?>
+</label>
+<div class="sm-hilfe"><?php echo oc_t('EINST.DEMO_HILFE'); ?></div>
+<div class="sm-reihe">
+  <div>
+    <label><?php echo oc_t('EINST.DEMO_AUFSCHLAG'); ?></label>
+    <input data-role="none" type="text" name="demo_aufschlag" value="<?php echo oc_e($oc_cfg['demo_aufschlag']); ?>" placeholder="15.0">
+  </div>
+  <div>
+    <label><?php echo oc_t('EINST.DEMO_VAT'); ?></label>
+    <input data-role="none" type="text" name="demo_vat" value="<?php echo oc_e($oc_cfg['demo_vat']); ?>" placeholder="19">
+  </div>
+  <div></div>
+</div>
+
+<h2><?php echo oc_t('EINST.H_BEWERTUNG'); ?></h2>
+<div class="sm-hilfe"><?php echo oc_t('EINST.BEWERTUNG_HILFE'); ?></div>
+<div class="sm-reihe">
+  <div>
+    <label><?php echo oc_t('EINST.CHEAP'); ?></label>
+    <input data-role="none" type="text" name="cheap" value="<?php echo oc_e($oc_cfg['cheap']); ?>" placeholder="20">
+  </div>
+  <div>
+    <label><?php echo oc_t('EINST.EXPENSIVE'); ?></label>
+    <input data-role="none" type="text" name="expensive" value="<?php echo oc_e($oc_cfg['expensive']); ?>" placeholder="35">
+  </div>
+  <div>
+    <label><?php echo oc_t('EINST.WINDOW'); ?></label>
+    <input data-role="none" type="text" name="window" value="<?php echo (int) $oc_cfg['window']; ?>" placeholder="3">
+    <div class="sm-hilfe"><?php echo oc_t('EINST.WINDOW_HILFE'); ?></div>
+  </div>
+</div>
+
+<h2><?php echo oc_t('EINST.H_CO2'); ?></h2>
+<label style="display:inline-flex;align-items:center;gap:6px;font-weight:600;">
+  <input data-role="none" type="checkbox" name="co2_enabled" <?php echo !empty($oc_cfg['co2_enabled']) ? 'checked' : ''; ?>>
+  <?php echo oc_t('EINST.CO2_AN'); ?>
+</label>
+<div class="sm-hilfe"><?php echo oc_t('EINST.CO2_HILFE'); ?></div>
+<div class="sm-reihe">
+  <div>
+    <label><?php echo oc_t('EINST.CO2_CLEAN'); ?></label>
+    <input data-role="none" type="text" name="co2_clean" value="<?php echo oc_e($oc_cfg['co2_clean']); ?>" placeholder="200">
+  </div>
+  <div></div><div></div>
+</div>
+
+<h2><?php echo oc_t('EINST.H_MELDUNG'); ?></h2>
+<label style="display:inline-flex;align-items:center;gap:6px;font-weight:600;">
+  <input data-role="none" type="checkbox" name="notify_audio" <?php echo !empty($oc_cfg['notify']['audio']) ? 'checked' : ''; ?>>
+  <?php echo oc_t('EINST.ANSAGE_AN'); ?>
+</label><br>
+<label style="display:inline-flex;align-items:center;gap:6px;margin-top:6px;font-weight:600;">
+  <input data-role="none" type="checkbox" name="notify_push" <?php echo !empty($oc_cfg['notify']['push']) ? 'checked' : ''; ?>>
+  <?php echo oc_t('EINST.PUSH_AN'); ?>
+</label>
+<div class="sm-hilfe"><?php echo oc_t('EINST.PUSH_HILFE'); ?></div>
+
+<h3><?php echo oc_t('EINST.STUNDEN'); ?></h3>
+<div class="sm-hilfe"><?php echo oc_t('EINST.STUNDEN_HILFE'); ?></div>
+<div class="sm-stunden">
+<?php for ($oc_h = 0; $oc_h < 24; $oc_h++) { ?>
+  <label><input data-role="none" type="checkbox" name="hours[]" value="<?php echo $oc_h; ?>"
+    <?php echo in_array($oc_h, $oc_hoursel, true) ? 'checked' : ''; ?>>
+    <?php printf('%02d:00', $oc_h); ?></label>
+<?php } ?>
+</div>
+<label style="display:inline-flex;align-items:center;gap:6px;margin-top:8px;font-weight:600;">
+  <input data-role="none" type="checkbox" name="only_cheap" <?php echo !empty($oc_cfg['notify']['only_cheap']) ? 'checked' : ''; ?>>
+  <?php echo oc_t('EINST.ONLY_CHEAP'); ?>
+</label><br>
+<label style="display:inline-flex;align-items:center;gap:6px;margin-top:6px;font-weight:600;">
+  <input data-role="none" type="checkbox" name="neg_always" <?php echo !empty($oc_cfg['notify']['negative']) ? 'checked' : ''; ?>>
+  <?php echo oc_t('EINST.NEG_ALWAYS'); ?>
+</label><br>
+<label style="display:inline-flex;align-items:center;gap:6px;margin-top:6px;font-weight:600;">
+  <input data-role="none" type="checkbox" name="notify_tomorrow" <?php echo !empty($oc_cfg['notify']['tomorrow']) ? 'checked' : ''; ?>>
+  <?php echo oc_t('EINST.TOMORROW'); ?>
+</label>
+
+<h3><?php echo oc_t('EINST.H_TTS'); ?></h3>
+<div class="sm-reihe">
+  <div>
+    <label><?php echo oc_t('EINST.TTS_MODE'); ?></label>
+    <select data-role="none" name="tts_mode">
+      <option value="musicserver" <?php echo $oc_tts['mode'] === 'musicserver' ? 'selected' : ''; ?>><?php echo oc_t('EINST.TTS_MS'); ?></option>
+      <option value="ms4h" <?php echo $oc_tts['mode'] === 'ms4h' ? 'selected' : ''; ?>><?php echo oc_t('EINST.TTS_MS4H'); ?></option>
+      <option value="audioserver" <?php echo $oc_tts['mode'] === 'audioserver' ? 'selected' : ''; ?>><?php echo oc_t('EINST.TTS_AS'); ?></option>
+      <option value="custom" <?php echo $oc_tts['mode'] === 'custom' ? 'selected' : ''; ?>><?php echo oc_t('EINST.TTS_CUSTOM'); ?></option>
+    </select>
+  </div>
+  <div>
+    <label><?php echo oc_t('EINST.TTS_IP'); ?></label>
+    <input data-role="none" type="text" name="tts_ip" value="<?php echo oc_e($oc_tts['ip']); ?>" placeholder="192.168.1.20">
+  </div>
+  <div>
+    <label><?php echo oc_t('EINST.TTS_PORT'); ?></label>
+    <input data-role="none" type="text" name="tts_port" value="<?php echo (int) $oc_tts['port']; ?>" placeholder="7091">
+  </div>
+  <div>
+    <label><?php echo oc_t('EINST.TTS_ZONES'); ?></label>
+    <input data-role="none" type="text" name="tts_zones" value="<?php echo oc_e($oc_tts['zones']); ?>" placeholder="1,2">
+  </div>
+  <div>
+    <label><?php echo oc_t('EINST.TTS_VOLUME'); ?></label>
+    <input data-role="none" type="text" name="tts_volume" value="<?php echo (int) $oc_tts['volume']; ?>" placeholder="8">
+    <div class="sm-hilfe"><?php echo oc_t('EINST.TTS_VOL_HILFE'); ?></div>
+  </div>
+  <div>
+    <label><?php echo oc_t('EINST.TTS_LANG'); ?></label>
+    <input data-role="none" type="text" name="tts_lang" value="<?php echo oc_e($oc_tts['lang']); ?>" placeholder="de">
+  </div>
+</div>
+<div class="sm-feld">
+  <label><?php echo oc_t('EINST.TTS_TEMPLATE'); ?></label>
+  <input data-role="none" type="text" name="tts_template" value="<?php echo oc_e($oc_tts['template']); ?>"
+         placeholder="http://{ip}:{port}/tts?text={text}&amp;zone={zones}&amp;vol={vol}">
+  <div class="sm-hilfe"><?php echo oc_t('EINST.TTS_TEMPLATE_HILFE'); ?></div>
+</div>
+
+<h2><?php echo oc_t('EINST.H_MQTT'); ?></h2>
+<label style="display:inline-flex;align-items:center;gap:6px;font-weight:600;">
+  <input data-role="none" type="checkbox" name="mqtt_enabled" <?php echo !empty($oc_cfg['mqtt_enabled']) ? 'checked' : ''; ?>>
+  <?php echo oc_t('EINST.MQTT_AN'); ?>
+</label>
+<div class="sm-reihe">
+  <div>
+    <label><?php echo oc_t('EINST.MQTT_TOPIC'); ?></label>
+    <input data-role="none" type="text" name="mqtt_topic" value="<?php echo oc_e($oc_cfg['mqtt_topic']); ?>" placeholder="octopus">
+    <div class="sm-hilfe"><?php echo oc_t('EINST.MQTT_TOPIC_HILFE'); ?></div>
+  </div>
+  <div></div><div></div>
+</div>
+
+<h2><?php echo oc_t('EINST.H_TOKEN'); ?></h2>
+<div class="sm-hilfe"><?php echo oc_t('EINST.TOKEN_HILFE'); ?></div>
+<div class="sm-pre"><?php echo oc_e($oc_endpunkt); ?>?token=<?php
+    echo oc_e($oc_cfg['aktionstoken'] !== '' ? $oc_cfg['aktionstoken'] : '(wird beim Speichern erzeugt)');
+?>&amp;aktion=status</div>
+<label style="display:inline-flex;align-items:center;gap:6px;font-weight:600;">
+  <input data-role="none" type="checkbox" name="token_neu" value="1">
+  <?php echo oc_t('EINST.TOKEN_NEU'); ?>
+</label>
+
+<h2><?php echo oc_t('EINST.H_VERBRAUCH'); ?></h2>
+<div class="sm-hilfe"><?php echo oc_t('EINST.VERBRAUCH_HILFE'); ?></div>
+<div class="sm-reihe">
+  <div>
+    <label><?php echo oc_t('EINST.CONSUMPTION'); ?></label>
+    <input data-role="none" type="text" name="consumption" value="<?php echo (int) $oc_cfg['consumption']; ?>" placeholder="3500">
+  </div>
+  <div>
+    <label><?php echo oc_t('EINST.SHIFT_KWH'); ?></label>
+    <input data-role="none" type="text" name="shift_kwh" value="<?php echo oc_e($oc_cfg['shift_kwh']); ?>" placeholder="3.0">
+    <div class="sm-hilfe"><?php echo oc_t('EINST.SHIFT_HILFE'); ?></div>
+  </div>
+  <div></div>
+</div>
+<h3><?php echo oc_t('EINST.MONATE'); ?></h3>
+<div class="sm-hilfe"><?php echo oc_t('EINST.MONATE_HILFE'); ?></div>
+<div class="sm-monate">
+<?php
+$oc_mnamen = array('MON.JAN', 'MON.FEB', 'MON.MAR', 'MON.APR', 'MON.MAI', 'MON.JUN',
+                   'MON.JUL', 'MON.AUG', 'MON.SEP', 'MON.OKT', 'MON.NOV', 'MON.DEZ');
+for ($oc_i = 0; $oc_i < 12; $oc_i++) { ?>
+  <div><label><?php echo oc_t($oc_mnamen[$oc_i]); ?></label>
+  <input data-role="none" type="text" name="months[<?php echo $oc_i; ?>]"
+         value="<?php echo $oc_mon['kwh'][$oc_i] > 0 ? oc_e($oc_mon['kwh'][$oc_i]) : ''; ?>" placeholder="0"></div>
+<?php } ?>
+</div>
+
+<h2><?php echo oc_t('EINST.H_VERGLEICH'); ?></h2>
+<div class="sm-hilfe"><?php echo oc_t('EINST.VERGLEICH_HILFE'); ?></div>
+<div class="sm-reihe">
+  <div>
+    <label><?php echo oc_t('EINST.FIXED_PRICE'); ?></label>
+    <input data-role="none" type="text" name="fixed_price" value="<?php echo oc_e($oc_cfg['fixed_price']); ?>" placeholder="30.90">
+  </div>
+  <div>
+    <label><?php echo oc_t('EINST.FIX_GRUND'); ?></label>
+    <input data-role="none" type="text" name="fix_grund" value="<?php echo oc_e($oc_cfg['fix_grund']); ?>" placeholder="12.90">
+  </div>
+  <div>
+    <label><?php echo oc_t('EINST.DYN_GRUND'); ?></label>
+    <input data-role="none" type="text" name="dyn_grund" value="<?php echo oc_e($oc_cfg['dyn_grund']); ?>" placeholder="0">
+    <div class="sm-hilfe"><?php echo oc_t('EINST.DYN_GRUND_HILFE'); ?></div>
+  </div>
+</div>
+<div class="sm-reihe">
+  <div>
+    <label><?php echo oc_t('EINST.SOFORTBONUS'); ?></label>
+    <input data-role="none" type="text" name="fix_sofortbonus" value="<?php echo oc_e($oc_cfg['fix_sofortbonus']); ?>" placeholder="0">
+  </div>
+  <div>
+    <label><?php echo oc_t('EINST.NEUBONUS'); ?></label>
+    <input data-role="none" type="text" name="fix_neubonus" value="<?php echo oc_e($oc_cfg['fix_neubonus']); ?>" placeholder="0">
+  </div>
+  <div>
+    <label><?php echo oc_t('EINST.NEUBONUS_PCT'); ?></label>
+    <input data-role="none" type="text" name="fix_neubonus_pct" value="<?php echo oc_e($oc_cfg['fix_neubonus_pct']); ?>" placeholder="0">
+  </div>
+  <div>
+    <label><?php echo oc_t('EINST.RABATT'); ?></label>
+    <input data-role="none" type="text" name="fix_rabatt" value="<?php echo oc_e($oc_cfg['fix_rabatt']); ?>" placeholder="0">
+  </div>
+</div>
+
+<div class="sm-knopfreihe">
+  <button class="sm-btn sm-b-lesen" type="submit"><?php echo oc_t('ALLGEMEIN.SPEICHERN'); ?></button>
+</div>
+</form>
+</div><!-- /tab-settings -->
+
+<!-- ==================== Reiter: MQTT ==================== -->
+<div class="sm-seite" id="tab-mqtt">
+<h2><?php echo oc_t('MQTT.H_ZUSTAND'); ?></h2>
+<div class="sm-hinweis"><?php echo oc_t('MQTT.GATEWAY_ERKLAERUNG'); ?></div>
+<table class="sm-tbl">
+<tr><th><?php echo oc_t('MQTT.SP_WAS'); ?></th><th><?php echo oc_t('MQTT.SP_WERT'); ?></th></tr>
+<tr><td><?php echo oc_t('MQTT.AUTOSTART'); ?></td>
+    <td><?php echo $oc_gw['autostart']
+        ? '<span class="sm-an">' . oc_t('ALLGEMEIN.JA') . '</span>'
+        : '<span class="sm-aus">' . oc_t('ALLGEMEIN.NEIN') . '</span> &mdash; ' . oc_t('MQTT.AUTOSTART_AUS'); ?></td></tr>
+<tr><td><?php echo oc_t('MQTT.BROKER'); ?></td>
+    <td><span class="sm-mono"><?php echo oc_e($oc_gw['broker'] . ':' . $oc_gw['port']); ?></span></td></tr>
+<tr><td><?php echo oc_t('MQTT.UDP'); ?></td>
+    <td><span class="sm-mono"><?php echo (int) $oc_gw['udpport']; ?></span></td></tr>
+<tr><td><?php echo oc_t('MQTT.LOKAL'); ?></td>
+    <td><?php echo (int) $oc_gw['lokal'] === 1 ? oc_t('ALLGEMEIN.JA') : oc_t('ALLGEMEIN.NEIN'); ?></td></tr>
+<tr><td><?php echo oc_t('MQTT.PLUGIN_AN'); ?></td>
+    <td><?php echo !empty($oc_cfg['mqtt_enabled'])
+        ? '<span class="sm-an">' . oc_t('ALLGEMEIN.JA') . '</span>'
+        : '<span class="sm-aus">' . oc_t('ALLGEMEIN.NEIN') . '</span>'; ?></td></tr>
+</table>
+
+<h2><?php echo oc_t('MQTT.H_ABO'); ?></h2>
+<div class="sm-step">
+<b><?php echo oc_t('MQTT.ABO_TITEL'); ?></b><br>
+<?php echo oc_t('MQTT.ABO_WEG'); ?>
+<div class="sm-pre"><?php echo oc_e($oc_cfg['mqtt_topic']); ?>/#</div>
+<b><?php echo oc_t('MQTT.ABO_WARNUNG'); ?></b>
+</div>
+
+<h2><?php echo oc_t('MQTT.H_THEMEN'); ?></h2>
+<div class="sm-hilfe"><?php echo str_replace('%P%',
+    '<span class="sm-mono">' . oc_e($oc_cfg['mqtt_topic']) . '</span>', oc_t('MQTT.THEMEN_HILFE')); ?></div>
+<table class="sm-tbl">
+<tr><th><?php echo oc_t('MQTT.SP_THEMA'); ?></th><th><?php echo oc_t('MQTT.SP_BEDEUTUNG'); ?></th>
+    <th><?php echo oc_t('MQTT.SP_EINHEIT'); ?></th><th><?php echo oc_t('MQTT.SP_AKTUELL'); ?></th></tr>
+<?php $oc_werte = oc_werte($oc_st); foreach (oc_themen() as $oc_k => $oc_info) { ?>
+<tr><td><span class="sm-mono"><?php echo oc_e($oc_cfg['mqtt_topic'] . '/' . $oc_k); ?></span></td>
+    <td><?php echo oc_t($oc_info[0]); ?></td>
+    <td><?php echo oc_e($oc_info[1]); ?></td>
+    <td><?php echo oc_e(isset($oc_werte[$oc_k]) ? $oc_werte[$oc_k] : ''); ?></td></tr>
+<?php } ?>
+</table>
+</div><!-- /tab-mqtt -->
+
+<!-- ==================== Reiter: Einbindung in Loxone ==================== -->
+<div class="sm-seite" id="tab-loxone">
+<h2><?php echo oc_t('LOX.H_SCHRITTE'); ?></h2>
+
+<div class="sm-step"><b><?php echo oc_t('LOX.S1_T'); ?></b><br><?php echo oc_t('LOX.S1'); ?></div>
+
+<div class="sm-step"><b><?php echo oc_t('LOX.S2_T'); ?></b><br><?php echo oc_t('LOX.S2'); ?>
+<div class="sm-pre"><?php echo oc_e($oc_cfg['mqtt_topic']); ?>/#</div>
+<b><?php echo oc_t('LOX.S2_WARN'); ?></b></div>
+
+<div class="sm-step"><b><?php echo oc_t('LOX.S3_T'); ?></b><br><?php echo oc_t('LOX.S3'); ?>
+<table class="sm-tbl">
+<tr><th><?php echo oc_t('LOX.SP_TITEL'); ?></th><th><?php echo oc_t('LOX.SP_EINHEIT'); ?></th>
+    <th><?php echo oc_t('LOX.SP_BEDEUTUNG'); ?></th></tr>
+<?php foreach (oc_themen() as $oc_k => $oc_info) { ?>
+<tr><td><span class="sm-mono"><?php echo oc_e($oc_cfg['mqtt_topic'] . '_' . $oc_k); ?></span></td>
+    <td><?php echo oc_e($oc_info[1] !== '' ? $oc_info[1] : '-'); ?></td>
+    <td><?php echo oc_t($oc_info[0]); ?></td></tr>
+<?php } ?>
+</table>
+<form action="index.php" method="post" style="margin-top:8px;">
+<input type="hidden" name="activetab" value="tab-loxone">
+<div class="sm-knopfreihe">
+  <button class="sm-btn sm-b-lesen" type="submit" name="download" value="mqtt_in"><?php echo oc_t('LOX.DL_MQTT'); ?></button>
+  <button class="sm-btn sm-b-technik" type="submit" name="download" value="http_in"><?php echo oc_t('LOX.DL_HTTP'); ?></button>
+</div>
+</form>
+<div class="sm-hilfe"><?php echo oc_t('LOX.DL_HILFE'); ?></div>
+</div>
+
+<div class="sm-step"><b><?php echo oc_t('LOX.S4_T'); ?></b><br><?php echo oc_t('LOX.S4'); ?>
+<div class="sm-pre"><?php echo oc_e($oc_endpunkt); ?>?token=<?php echo oc_e($oc_cfg['aktionstoken']); ?>&amp;aktion=say
+<?php echo oc_e($oc_endpunkt); ?>?token=<?php echo oc_e($oc_cfg['aktionstoken']); ?>&amp;aktion=ptest
+<?php echo oc_e($oc_endpunkt); ?>?token=<?php echo oc_e($oc_cfg['aktionstoken']); ?>&amp;aktion=refresh</div>
+</div>
+
+<div class="sm-step"><b><?php echo oc_t('LOX.S5_T'); ?></b><br><?php echo oc_t('LOX.S5'); ?></div>
+
+<div class="sm-step"><b><?php echo oc_t('LOX.S6_T'); ?></b><br><?php echo oc_t('LOX.S6'); ?>
+<table class="sm-tbl">
+<tr><th>#</th><th><?php echo oc_t('LOX.B_TYP'); ?></th><th><?php echo oc_t('LOX.B_NAME'); ?></th>
+    <th><?php echo oc_t('LOX.B_PARAM'); ?></th><th><?php echo oc_t('LOX.B_EIN'); ?></th></tr>
+<?php
+$oc_pf = $oc_cfg['mqtt_topic'];
+$oc_bausteine = array(
+    array(1,  'LOX.T_VE',        'VE_' . $oc_pf . '_cur',        'LOX.P_VE_CUR',    'LOX.E_MQTT'),
+    array(2,  'LOX.T_VE',        'VE_' . $oc_pf . '_cur_h',      'LOX.P_VE_CURH',   'LOX.E_MQTT'),
+    array(3,  'LOX.T_VE',        'VE_' . $oc_pf . '_rank',       'LOX.P_VE_RANK',   'LOX.E_MQTT'),
+    array(4,  'LOX.T_VE',        'VE_' . $oc_pf . '_level',      'LOX.P_VE_LEVEL',  'LOX.E_MQTT'),
+    array(5,  'LOX.T_VE',        'VE_' . $oc_pf . '_ok',         'LOX.P_VE_OK',     'LOX.E_MQTT'),
+    array(6,  'LOX.T_VE',        'VE_' . $oc_pf . '_alter',      'LOX.P_VE_ALTER',  'LOX.E_MQTT'),
+    array(7,  'LOX.T_VE',        'VE_' . $oc_pf . '_fenster_in', 'LOX.P_VE_FIN',    'LOX.E_MQTT'),
+    array(8,  'LOX.T_VE',        'VE_' . $oc_pf . '_neg',        'LOX.P_VE_NEG',    'LOX.E_MQTT'),
+    array(9,  'LOX.T_VE',        'VE_' . $oc_pf . '_co2_clean',  'LOX.P_VE_CO2',    'LOX.E_MQTT'),
+    array(10, 'LOX.T_VE',        'VE_' . $oc_pf . '_ann',        'LOX.P_VE_ANN',    'LOX.E_MQTT'),
+    array(11, 'LOX.T_VE',        'VE_' . $oc_pf . '_ptest',      'LOX.P_VE_PTEST',  'LOX.E_MQTT'),
+    array(12, 'LOX.T_STATUS',    'ST_Strompreis',                'LOX.P_STATUS',    'LOX.E_1'),
+    array(13, 'LOX.T_SCHWELLE',  'SW_Guenstig',                  'LOX.P_SW_G',      'LOX.E_1'),
+    array(14, 'LOX.T_SCHWELLE',  'SW_Teuer',                     'LOX.P_SW_T',      'LOX.E_1'),
+    array(15, 'LOX.T_VERGLEICH', 'VG_Rang_Guenstig',             'LOX.P_VG_RANG',   'LOX.E_3'),
+    array(16, 'LOX.T_ODER',      'OD_Laden_frei',                'LOX.P_OD',        'LOX.E_ODER'),
+    array(17, 'LOX.T_UND',       'UN_Laden',                     'LOX.P_UN',        'LOX.E_UND'),
+    array(18, 'LOX.T_MERKER',    'MK_Daten_alt',                 'LOX.P_MK_ALT',    'LOX.E_6'),
+    array(19, 'LOX.T_ODER',      'OD_Meldung',                   'LOX.P_OD_MELD',   'LOX.E_MELD'),
+    array(20, 'LOX.T_BENACHR',   'BN_Strompreis',                'LOX.P_BN',        'LOX.E_19'),
+    array(21, 'LOX.T_TEXTGEN',   'TG_Ansage',                    'LOX.P_TG',        'LOX.E_10'),
+    array(22, 'LOX.T_STATISTIK', 'SG_Preisverlauf',              'LOX.P_SG',        'LOX.E_1'),
+);
+foreach ($oc_bausteine as $oc_b) { ?>
+<tr><td><?php echo $oc_b[0]; ?></td><td><?php echo oc_t($oc_b[1]); ?></td>
+    <td><span class="sm-mono"><?php echo oc_e($oc_b[2]); ?></span></td>
+    <td><?php echo oc_t($oc_b[3]); ?></td><td><?php echo oc_t($oc_b[4]); ?></td></tr>
+<?php } ?>
+</table>
+<div class="sm-hilfe"><?php echo oc_t('LOX.B_ERKLAERUNG'); ?></div>
+</div>
+
+<div class="sm-step"><b><?php echo oc_t('LOX.S7_T'); ?></b><br><?php echo oc_t('LOX.S7'); ?></div>
+</div><!-- /tab-loxone -->
+
+<!-- ==================== Reiter: Kostenvergleich ==================== -->
+<div class="sm-seite" id="tab-costs">
+<h2><?php echo oc_t('KOST.H_JAHR'); ?></h2>
+<div class="sm-hilfe"><?php echo str_replace(array('%N%', '%S%'),
+    array((int) $oc_kos['monate_gemessen'], oc_n($oc_kos['schnitt'], 2)),
+    oc_t('KOST.GRUNDLAGE')); ?></div>
+<table class="sm-tbl">
+<tr><th><?php echo oc_t('KOST.SP_POSTEN'); ?></th><th><?php echo oc_t('KOST.SP_DYN'); ?></th>
+    <th><?php echo oc_t('KOST.SP_FIX'); ?></th></tr>
+<tr><td><?php echo oc_t('KOST.ARBEIT'); ?></td>
+    <td><?php echo oc_n($oc_kos['dyn_arbeit'], 2); ?> &euro;</td>
+    <td><?php echo oc_n($oc_kos['fix_arbeit'], 2); ?> &euro;</td></tr>
+<tr><td><?php echo oc_t('KOST.GRUND'); ?></td>
+    <td><?php echo oc_n($oc_kos['dyn_grund'], 2); ?> &euro;</td>
+    <td><?php echo oc_n($oc_kos['fix_grund'], 2); ?> &euro;</td></tr>
+<tr><td><?php echo oc_t('KOST.RABATT'); ?> (<?php echo oc_n($oc_kos['rabatt_pct'], 1); ?> %)</td>
+    <td>&ndash;</td><td>&minus; <?php echo oc_n($oc_kos['rabatt'], 2); ?> &euro;</td></tr>
+<tr><td><?php echo oc_t('KOST.BONI'); ?></td>
+    <td>&ndash;</td><td>&minus; <?php echo oc_n($oc_kos['boni'], 2); ?> &euro;</td></tr>
+<tr><th><?php echo oc_t('KOST.JAHR1'); ?></th>
+    <th><?php echo oc_n($oc_kos['dyn_jahr'], 2); ?> &euro;</th>
+    <th><?php echo oc_n($oc_kos['fix_jahr1'], 2); ?> &euro;</th></tr>
+<tr><th><?php echo oc_t('KOST.FOLGE'); ?></th>
+    <th><?php echo oc_n($oc_kos['dyn_jahr'], 2); ?> &euro;</th>
+    <th><?php echo oc_n($oc_kos['fix_folge'], 2); ?> &euro;</th></tr>
+</table>
+<div class="sm-hinweis">
+<?php echo str_replace(array('%K%', '%V1%', '%VF%'),
+    array(oc_n($oc_kos['kwh'], 0), oc_n(abs($oc_kos['vorteil1']), 2), oc_n(abs($oc_kos['vorteilf']), 2)),
+    oc_t($oc_kos['vorteilf'] >= 0 ? 'KOST.FAZIT_DYN' : 'KOST.FAZIT_FIX')); ?>
+</div>
+
+<h2><?php echo oc_t('KOST.H_MONATE'); ?></h2>
+<table class="sm-tbl">
+<tr><th><?php echo oc_t('KOST.SP_MONAT'); ?></th><th><?php echo oc_t('KOST.SP_TAGE'); ?></th>
+    <th><?php echo oc_t('KOST.SP_DYNP'); ?></th><th><?php echo oc_t('KOST.SP_FIXP'); ?></th>
+    <th><?php echo oc_t('KOST.SP_DIFF'); ?></th><th><?php echo oc_t('KOST.SP_EURO'); ?></th></tr>
+<?php $oc_mc = oc_month_compare(24); if (!$oc_mc) { ?>
+<tr><td colspan="6"><?php echo oc_t('KOST.KEINE_HISTORIE'); ?></td></tr>
+<?php } foreach ($oc_mc as $oc_m) { ?>
+<tr><td><?php echo oc_e(substr($oc_m['monat'], 4, 2) . '/' . substr($oc_m['monat'], 0, 4)); ?></td>
+    <td><?php echo (int) $oc_m['tage']; ?></td>
+    <td><?php echo oc_n($oc_m['dynp'], 2); ?></td>
+    <td><?php echo oc_n($oc_m['fix'], 2); ?></td>
+    <td><?php echo ($oc_m['diff'] >= 0 ? '+' : '&minus;') . oc_n(abs($oc_m['diff']), 2); ?></td>
+    <td><?php echo ($oc_m['euro'] >= 0 ? '+' : '&minus;') . oc_n(abs($oc_m['euro']), 2); ?> &euro;</td></tr>
+<?php } ?>
+</table>
+
+<h2><?php echo oc_t('KOST.H_SHIFT'); ?></h2>
+<?php $oc_sh = oc_shift_saving(7); ?>
+<div class="sm-hinweis"><?php echo str_replace(
+    array('%T%', '%C%', '%K%', '%E%', '%J%'),
+    array((int) $oc_sh['tage'], oc_n($oc_sh['ct'], 2), oc_n($oc_sh['kwh'], 1),
+          oc_n($oc_sh['euro'], 2), oc_n($oc_sh['euro_jahr'], 2)),
+    oc_t('KOST.SHIFT_TEXT')); ?></div>
+
+<h2><?php echo oc_t('KOST.H_HISTORIE'); ?></h2>
+<table class="sm-tbl">
+<tr><th><?php echo oc_t('KOST.SP_TAG'); ?></th><th><?php echo oc_t('KOST.SP_AVG'); ?></th>
+    <th><?php echo oc_t('KOST.SP_MIN'); ?></th><th><?php echo oc_t('KOST.SP_MAX'); ?></th>
+    <th><?php echo oc_t('KOST.SP_GEW'); ?></th><th>CO&#8322;</th><th><?php echo oc_t('KOST.SP_QUELLE'); ?></th></tr>
+<?php if (!$oc_hist) { ?><tr><td colspan="7"><?php echo oc_t('KOST.KEINE_HISTORIE'); ?></td></tr><?php }
+foreach (array_reverse($oc_hist) as $oc_r) { ?>
+<tr><td><?php echo oc_e(substr($oc_r[0], 6, 2) . '.' . substr($oc_r[0], 4, 2) . '.' . substr($oc_r[0], 0, 4)); ?></td>
+    <td><?php echo oc_n($oc_r[1], 2); ?></td><td><?php echo oc_n($oc_r[2], 2); ?></td>
+    <td><?php echo oc_n($oc_r[3], 2); ?></td><td><?php echo oc_n($oc_r[4], 2); ?></td>
+    <td><?php echo (int) $oc_r[5]; ?></td>
+    <td><?php echo $oc_r[6] ? oc_t('KOST.Q_DEMO') : oc_t('KOST.Q_ECHT'); ?></td></tr>
+<?php } ?>
+</table>
+</div><!-- /tab-costs -->
+
+<!-- ==================== Reiter: Test ==================== -->
+<div class="sm-seite" id="tab-test">
+<h2><?php echo oc_t('TEST.H_PRUEFUNG'); ?></h2>
+<div class="sm-legende">
+<span><i class="sm-punkt sm-b-lesen"></i> <?php echo oc_t('LEGENDE.LESEN'); ?></span>
+<span><i class="sm-punkt sm-b-technik"></i> <?php echo oc_t('LEGENDE.TECHNIK'); ?></span>
+<span><i class="sm-punkt sm-b-aktion"></i> <?php echo oc_t('LEGENDE.AKTION'); ?></span>
+</div>
+
+<div class="sm-knopfreihe">
+<?php foreach (array('selbst' => 'TEST.K_SELBST', 'abruf' => 'TEST.K_ABRUF',
+                     'anmeldung' => 'TEST.K_ANMELDUNG') as $oc_a => $oc_l) { ?>
+  <form action="index.php" method="post"><input type="hidden" name="activetab" value="tab-test">
+  <button class="sm-btn sm-b-lesen" type="submit" name="test" value="<?php echo $oc_a; ?>"><?php echo oc_t($oc_l); ?></button></form>
+<?php } ?>
+</div>
+<div class="sm-knopfreihe">
+<?php foreach (array('gateway' => 'TEST.K_GATEWAY', 'endpunkt' => 'TEST.K_ENDPUNKT') as $oc_a => $oc_l) { ?>
+  <form action="index.php" method="post"><input type="hidden" name="activetab" value="tab-test">
+  <button class="sm-btn sm-b-technik" type="submit" name="test" value="<?php echo $oc_a; ?>"><?php echo oc_t($oc_l); ?></button></form>
+<?php } ?>
+</div>
+
+<h3><?php echo oc_t('TEST.H_SCHALTEN'); ?></h3>
+<div class="sm-warnung"><?php echo oc_t('TEST.SCHALTEN_HINWEIS'); ?></div>
+<div class="sm-knopfreihe">
+<?php foreach (array('mqtt' => 'TEST.K_MQTT', 'say' => 'TEST.K_SAY',
+                     'saytomorrow' => 'TEST.K_SAYTOMORROW', 'ptest' => 'TEST.K_PTEST') as $oc_a => $oc_l) { ?>
+  <form action="index.php" method="post"><input type="hidden" name="activetab" value="tab-test">
+  <button class="sm-btn sm-b-aktion" type="submit" name="test" value="<?php echo $oc_a; ?>"><?php echo oc_t($oc_l); ?></button></form>
+<?php } ?>
+</div>
+
+<?php if ($oc_test_titel !== '') { ?>
+<h2><?php echo $oc_test_titel; ?></h2>
+<div class="sm-step"><?php echo $oc_test_text; ?></div>
+<?php } ?>
+</div><!-- /tab-test -->
+
+<!-- ==================== Reiter: Logdateien ==================== -->
+<div class="sm-seite" id="tab-log">
+<h2><?php echo oc_t('LOG.H'); ?></h2>
+<div class="sm-hilfe"><?php echo str_replace('%F%',
+    '<span class="sm-mono">' . oc_e($oc_p['log']) . '</span>', oc_t('LOG.DATEI')); ?></div>
+<?php
+if (class_exists('LBWeb', false) && method_exists('LBWeb', 'loglist_html')) {
+    echo LBWeb::loglist_html();
+}
+?>
+<form action="index.php" method="post">
+<input type="hidden" name="activetab" value="tab-log">
+<div class="sm-knopfreihe">
+  <button class="sm-btn sm-b-aktion" type="submit" name="clearlog" value="1"><?php echo oc_t('LOG.LEEREN'); ?></button>
+</div>
+</form>
+<div class="sm-pre" style="max-height:520px;"><?php
+foreach ($oc_loglines as $oc_l) { echo oc_e($oc_l) . "\n"; }
+if (!$oc_loglines) { echo oc_e(oc_t('LOG.LEER')); }
+?></div>
+</div><!-- /tab-log -->
+
+</div><!-- /sm-wrap -->
+
+<script>
+(function () {
+	var reiter = document.querySelectorAll('.sm-tab');
+	function zeige(id) {
+		reiter.forEach(function (r) { r.classList.toggle('sm-active', r.dataset.ziel === id); });
+		document.querySelectorAll('.sm-seite').forEach(function (s) { s.classList.toggle('sm-active', s.id === id); });
+		document.querySelectorAll('input[name="activetab"]').forEach(function (f) { f.value = id; });
+		if (history.replaceState) { history.replaceState(null, '', 'index.php?form=' + id.replace('tab-', '')); }
+	}
+	reiter.forEach(function (r) {
+		r.addEventListener('click', function (e) { e.preventDefault(); zeige(r.dataset.ziel); });
+	});
+	zeige(<?php echo json_encode($oc_tab); ?>);
+})();
+</script>
+<?php
+if ($oc_rahmen) { LBWeb::lbfooter(); }
