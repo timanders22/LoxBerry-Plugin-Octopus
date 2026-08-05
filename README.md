@@ -203,11 +203,15 @@ erfassten Tag belastbarer. Die Anzahl der zugrunde liegenden Monate steht
 
 ## Release
 
-Solange kein eigenes Repository besteht, steht `AUTOMATIC_UPDATES=false` und
-die Adressen in `release.cfg` und `prerelease.cfg` sind leer. Andernfalls
-böte LoxBerry ein Downgrade auf einen fremden Stand an.
+Das Auto-Update ist eingeschaltet und zeigt auf **dieses** Repository — nicht
+auf einen fremden Stand, denn sonst böte LoxBerry irgendwann ein Downgrade an.
 
-Beim ersten Release müssen **drei Stellen** zusammenpassen, sonst greift das
+Die Fassung steht bewusst weiterhin auf `0.9.0`, solange die beiden
+Cloud-Abfragen nicht an einem echten Vertrag erprobt sind. Es wird deshalb
+niemandem ein Update angeboten (0.9.0 = 0.9.0); sobald `1.0.0` erscheint,
+greift die Aktualisierung von selbst.
+
+Bei jedem Release müssen **drei Stellen** zusammenpassen, sonst greift das
 Auto-Update nicht:
 
 1. `plugin.cfg` → `VERSION`
