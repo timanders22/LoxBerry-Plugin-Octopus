@@ -151,6 +151,16 @@ function oc_vorgaben()
         'cheap'         => 20.0,   // Schwelle "guenstig" in ct/kWh brutto
         'expensive'     => 35.0,   // Schwelle "teuer" in ct/kWh brutto
         'window'        => 3,      // Laenge des gesuchten guenstigsten Fensters in Stunden
+        // Schaltregeln (ab 0.9.1): je Regel EIN fertiges 0/1-Signal. Bis 0.9.0
+        // lieferte das Plugin nur Zahlen - Startzeit, Minuten bis dahin,
+        // Durchschnittspreis. Siehe oc_regel_werte().
+        'regeln'        => array(),
+        // Stundenprofil fuer den Spot Price Optimizer von Loxone:
+        //   aus | absolut (PH00-PH23) | relativ (PR00-PR23) | beides
+        // Der Baustein hat nur 24 Preiseingaenge - die Viertelstunden werden
+        // dafuer stundenweise gemittelt. Das ist kein Verlust an Genauigkeit
+        // fuer den Baustein, sondern die einzige Form, die er annimmt.
+        'profil_ein'    => 'aus',
         // CO2
         'co2_enabled'   => 1,
         'co2_clean'     => 200,    // Schwelle "sauber" in g CO2/kWh
@@ -206,6 +216,26 @@ function oc_config()
     if (!is_array($cfg['months'])) { $cfg['months'] = array(); }
     for ($i = 0; $i < 12; $i++) {
         $cfg['months'][$i] = isset($cfg['months'][$i]) ? max(0, (float) $cfg['months'][$i]) : 0.0;
+    }
+    // ---- Schaltregeln und Profil (ab 0.9.1) ----
+    if (!is_array($cfg['regeln'])) { $cfg['regeln'] = array(); }
+    for ($i = 0; $i < OC_REGELN; $i++) {
+        $r = isset($cfg['regeln'][$i]) && is_array($cfg['regeln'][$i]) ? $cfg['regeln'][$i] : array();
+        $r += oc_regel_vorgabe();
+        $r['aktiv'] = empty($r['aktiv']) ? 0 : 1;
+        $r['neg'] = empty($r['neg']) ? 0 : 1;
+        $r['name'] = trim((string) $r['name']);
+        $r['art'] = in_array($r['art'], array('fenster', 'stunden', 'schwelle', 'mittel'), true) ? $r['art'] : 'fenster';
+        $r['n'] = max(1, min(12, (int) $r['n']));
+        $r['von'] = max(0, min(23, (int) $r['von']));
+        $r['bis'] = max(0, min(23, (int) $r['bis']));
+        $r['horizont'] = max(1, min(48, (int) $r['horizont']));
+        $r['schwelle'] = (float) $r['schwelle'];
+        $r['prozent'] = max(0, min(90, (int) $r['prozent']));
+        $cfg['regeln'][$i] = $r;
+    }
+    if (!in_array($cfg['profil_ein'], array('aus', 'absolut', 'relativ', 'beides'), true)) {
+        $cfg['profil_ein'] = 'aus';
     }
     return $cfg;
 }
@@ -701,6 +731,183 @@ function oc_stunden($slots)
     return $out;
 }
 
+/* ==================================================================
+ * Schaltregeln - fertige 0/1-Signale statt Zahlen
+ *
+ * Bis 0.9.0 lieferte das Plugin Startzeit, Minuten bis dahin und
+ * Durchschnittspreis des guenstigsten Fensters. Alles Zahlen. Wer daraus
+ * "jetzt laden" machen wollte, baute im Miniserver eine Kaskade aus
+ * Vergleichern und Zeitbausteinen. Eine Schaltregel beantwortet die Frage
+ * hier und gibt eine Eins oder eine Null aus.
+ *
+ * BESONDERHEIT GEGENUEBER DEM AWATTAR-PLUGIN: Octopus rechnet in
+ * VIERTELSTUNDEN. Die Regeln arbeiten deshalb auf Slots zu 900 s. Die
+ * Angabe "Anzahl Stunden" wird intern mit vier multipliziert, und 'in'
+ * und 'rest' zaehlen in MINUTEN - wie das bereits vorhandene fenster_in.
+ *
+ * Vier Arten:
+ *   fenster   die N guenstigsten Stunden AM STUECK   (Wallbox, Waschmaschine)
+ *   stunden   die N guenstigsten VOLLEN Stunden      (Speicher, Warmwasser)
+ *   schwelle  Preis unter einem festen Wert          (Heizstab)
+ *   mittel    Preis X % unter dem Tagesmittel        (mitlaufend)
+ *
+ * Bei 'stunden' wird bewusst auf volle Stunden gemittelt statt die
+ * guenstigsten Viertelstunden zu picken: sonst schaltet die Wallbox im
+ * Viertelstundentakt an und aus.
+ * ================================================================== */
+
+define('OC_REGELN', 4);
+
+/** Vorgabe einer Schaltregel. */
+function oc_regel_vorgabe()
+{
+    return array(
+        'aktiv' => 0,
+        'name' => '',
+        'art' => 'fenster',   // fenster | stunden | schwelle | mittel
+        'n' => 3,             // Anzahl Stunden
+        'von' => 0,           // Zeitfenster von (Stunde, einschliesslich)
+        'bis' => 0,           // bis (Stunde, ausschliesslich); von == bis = ganzer Tag
+        'horizont' => 24,     // nur die naechsten X Stunden betrachten
+        'schwelle' => 20.0,   // ct/kWh brutto (art = schwelle)
+        'prozent' => 20,      // % unter dem Tagesmittel (art = mittel)
+        'neg' => 1,           // bei negativem Preis immer einschalten
+    );
+}
+
+/** Liegt die Stunde $h im Zeitfenster? von == bis bedeutet: ganzer Tag. */
+function oc_in_zeitfenster($h, $von, $bis)
+{
+    $h = (int) $h; $von = (int) $von; $bis = (int) $bis;
+    if ($von === $bis) { return true; }
+    if ($von < $bis) { return $h >= $von && $h < $bis; }
+    return $h >= $von || $h < $bis;   // ueber Mitternacht, z. B. 22 bis 6
+}
+
+/** Viertelstunden, die fuer eine Regel in Frage kommen. ts => ct. */
+function oc_regel_kandidaten($r, $slots, $start)
+{
+    $ende = $start + max(1, (int) $r['horizont']) * 3600;
+    $out = array();
+    foreach ($slots as $ts => $s) {
+        if ($ts < $start || $ts >= $ende) { continue; }
+        if (!oc_in_zeitfenster((int) date('G', $ts), $r['von'], $r['bis'])) { continue; }
+        $out[$ts] = (float) $s['ct'];
+    }
+    ksort($out);
+    return $out;
+}
+
+/**
+ * Eine Regel auswerten.
+ * Rueckgabe: aktiv (0/1), in (Minuten bis zum naechsten Treffer, -1 = keiner),
+ * rest (verbleibende Minuten am Stueck), ct (Schnitt der Treffer),
+ * start (Startstunde), startmin (Startminute), grund.
+ */
+function oc_regel_werte($r, $slots, $st)
+{
+    $leer = array('aktiv' => 0, 'in' => -1, 'rest' => 0, 'ct' => 0.0,
+                  'start' => -1, 'startmin' => 0, 'grund' => 'aus');
+    if (empty($r['aktiv'])) { return $leer; }
+    $jetzt = (int) $st['slotstart'];
+    $kand = oc_regel_kandidaten($r, $slots, $jetzt);
+    $treffer = array();
+
+    if ($r['art'] === 'fenster') {
+        // N Stunden am Stueck = N*4 luekenlose Viertelstunden.
+        $ks = array_keys($kand);
+        $len = min(max(1, (int) $r['n']) * 4, count($ks));
+        $best = null;
+        for ($i = 0; $len > 0 && $i + $len <= count($ks); $i++) {
+            if ($ks[$i + $len - 1] - $ks[$i] !== ($len - 1) * 900) { continue; }
+            $s = 0.0;
+            for ($j = 0; $j < $len; $j++) { $s += $kand[$ks[$i + $j]]; }
+            if ($best === null || $s / $len < $best[1]) { $best = array($i, $s / $len); }
+        }
+        if ($best !== null) {
+            for ($j = 0; $j < $len; $j++) { $treffer[] = $ks[$best[0] + $j]; }
+        }
+    } elseif ($r['art'] === 'stunden') {
+        // Volle Stunden mitteln, die N guenstigsten nehmen, dann alle
+        // Viertelstunden dieser Stunden als Treffer melden.
+        $std = array();
+        foreach ($kand as $ts => $ct) {
+            $h = $ts - ($ts % 3600);
+            if (!isset($std[$h])) { $std[$h] = array(0.0, 0); }
+            $std[$h][0] += $ct;
+            $std[$h][1]++;
+        }
+        $mittel = array();
+        foreach ($std as $h => $v) {
+            // Angebrochene Stunden nicht bewerten - sie waeren kuenstlich
+            // guenstig oder teuer, je nachdem welche Viertel fehlen.
+            if ($v[1] === 4) { $mittel[$h] = $v[0] / 4; }
+        }
+        asort($mittel);
+        $gewaehlt = array_slice(array_keys($mittel), 0, max(1, (int) $r['n']));
+        foreach ($kand as $ts => $ct) {
+            if (in_array($ts - ($ts % 3600), $gewaehlt, true)) { $treffer[] = $ts; }
+        }
+        sort($treffer);
+    } else {
+        if ($r['art'] === 'schwelle') {
+            $grenze = (float) $r['schwelle'];
+        } else {
+            $m = (float) $st['heute']['avg'];
+            if ($m <= 0 && $kand) { $m = array_sum($kand) / count($kand); }
+            $grenze = round($m * (1 - max(0, min(90, (int) $r['prozent'])) / 100), 3);
+        }
+        foreach ($kand as $ts => $ct) {
+            if ($ct <= $grenze) { $treffer[] = $ts; }
+        }
+    }
+
+    $erg = $leer;
+    if ($treffer) {
+        $erg['ct'] = round(array_sum(array_intersect_key($kand, array_flip($treffer))) / count($treffer), 3);
+        $erg['aktiv'] = in_array($jetzt, $treffer, true) ? 1 : 0;
+        foreach ($treffer as $ts) {
+            if ($ts >= $jetzt) {
+                $erg['start'] = (int) date('G', $ts);
+                $erg['startmin'] = (int) date('i', $ts);
+                $erg['in'] = (int) round(($ts - $jetzt) / 60);
+                break;
+            }
+        }
+        if ($erg['aktiv']) {
+            $rest = 0;
+            for ($ts = $jetzt; in_array($ts, $treffer, true); $ts += 900) { $rest += 15; }
+            $erg['rest'] = $rest;
+        }
+        $erg['grund'] = $erg['aktiv'] ? $r['art'] : 'wartet';
+    }
+
+    // Negativer Preis sticht - wer dann nicht laedt, verschenkt Geld.
+    if (!empty($r['neg']) && !empty($st['neg'])) {
+        $erg['aktiv'] = 1;
+        $erg['in'] = 0;
+        $erg['rest'] = max(15, (int) $erg['rest']);
+        $erg['grund'] = 'negativ';
+    }
+    return $erg;
+}
+
+/** Alle Regeln auswerten. */
+function oc_regeln($slots, $st)
+{
+    $cfg = oc_config();
+    $out = array();
+    foreach ($cfg['regeln'] as $i => $r) {
+        $w = oc_regel_werte($r, $slots, $st);
+        $w['nr'] = $i + 1;
+        $w['name'] = $r['name'] !== '' ? $r['name'] : ('Regel ' . ($i + 1));
+        $w['art'] = $r['art'];
+        $w['ein'] = empty($r['aktiv']) ? 0 : 1;
+        $out[] = $w;
+    }
+    return $out;
+}
+
 /** Kennzahlen eines Tages aus den Viertelstunden zwischen $von und $bis. */
 function oc_tagstats($slots, $von, $bis)
 {
@@ -881,6 +1088,22 @@ function oc_state($force = false)
     $st['shift_jahr'] = $sh['euro_jahr'];
 
     @file_put_contents($cache, json_encode($st));
+    // Stundenmittel fuer den Spot Price Optimizer: der Baustein hat nur
+    // 24 Preiseingaenge, Viertelstunden nimmt er nicht an.
+    $stdh = oc_stunden($slots);
+    $st['profil_heute'] = array();
+    $st['profil_morgen'] = array();
+    $st['profil_relativ'] = array();
+    $t0 = strtotime('today 00:00');
+    $m0 = strtotime('tomorrow 00:00');
+    for ($h = 0; $h < 24; $h++) {
+        $st['profil_heute'][$h] = isset($stdh[$t0 + $h * 3600]) ? $stdh[$t0 + $h * 3600] : 0.0;
+        $st['profil_morgen'][$h] = isset($stdh[$m0 + $h * 3600]) ? $stdh[$m0 + $h * 3600] : 0.0;
+        $st['profil_relativ'][$h] = isset($stdh[$hstart + $h * 3600]) ? $stdh[$hstart + $h * 3600] : 0.0;
+    }
+    // Zuletzt: die Regeln brauchen neg, slotstart und das Tagesmittel.
+    $st['regeln'] = oc_regeln($slots, $st);
+
     oc_log_if_changed('zustand', 'jetzt=' . $st['cur'] . ' ct rang=' . $st['rank'] . '/' . $st['n']
         . ' niveau=' . $st['level'] . ' morgen=' . $st['tomorrow_ok'] . ' demo=' . $st['demo']);
     return $st;
@@ -1167,7 +1390,7 @@ function oc_gateway()
  */
 function oc_themen()
 {
-    return array(
+    $t = array(
         'ok'            => array('THEMA.OK', ''),
         'demo'          => array('THEMA.DEMO', ''),
         'cur'           => array('THEMA.CUR', 'ct/kWh'),
@@ -1210,6 +1433,44 @@ function oc_themen()
         'ptest'         => array('THEMA.PTEST', ''),
         'alter'         => array('THEMA.ALTER', 'min'),
     );
+    // Schaltregeln: je Regel vier Themen. 'aktiv' ist das digitale Signal,
+    // an dem in Loxone ein Eingang haengt - der Rest ist Beiwerk.
+    $cfg = oc_config();
+    for ($i = 1; $i <= OC_REGELN; $i++) {
+        $name = trim((string) $cfg['regeln'][$i - 1]['name']);
+        $zusatz = $name !== '' ? ' (' . $name . ')' : '';
+        $t['regel' . $i . '_aktiv'] = array('THEMA.REGEL_AKTIV', '', $i, $zusatz);
+        $t['regel' . $i . '_in']    = array('THEMA.REGEL_IN', 'min', $i, $zusatz);
+        $t['regel' . $i . '_rest']  = array('THEMA.REGEL_REST', 'min', $i, $zusatz);
+        $t['regel' . $i . '_ct']    = array('THEMA.REGEL_CT', 'ct/kWh', $i, $zusatz);
+    }
+    // Stundenprofil fuer den Spot Price Optimizer.
+    $modus = (string) $cfg['profil_ein'];
+    if ($modus === 'absolut' || $modus === 'beides') {
+        for ($h = 0; $h < 24; $h++) {
+            $t[sprintf('ph%02d', $h)] = array('THEMA.PH', 'ct/kWh', $h, '');
+            $t[sprintf('pm%02d', $h)] = array('THEMA.PM', 'ct/kWh', $h, '');
+        }
+    }
+    if ($modus === 'relativ' || $modus === 'beides') {
+        for ($h = 0; $h < 24; $h++) {
+            $t[sprintf('pr%02d', $h)] = array('THEMA.PR', 'ct/kWh', $h, '');
+        }
+    }
+    return $t;
+}
+
+/**
+ * Klartext zu einem Thema. Regel- und Profilthemen tragen zusaetzlich eine
+ * Nummer (Regel 1-4, Stunde 0-23) und den vom Anwender vergebenen Namen -
+ * ein Eingang "Wallbox" ist beim Verdrahten mehr wert als "Regel 1".
+ */
+function oc_thema_text($info)
+{
+    $t = strip_tags(html_entity_decode(oc_t($info[0]), ENT_QUOTES, 'UTF-8'));
+    if (isset($info[2])) { $t = sprintf($t, (int) $info[2]); }
+    if (isset($info[3])) { $t .= (string) $info[3]; }
+    return $t;
 }
 
 /** Werte zu den Themen. */
@@ -1217,7 +1478,7 @@ function oc_werte($st = null)
 {
     $cfg = oc_config();
     if ($st === null) { $st = oc_state(); }
-    return array(
+    $w = array(
         'ok'            => $st['ok'],
         'demo'          => $st['demo'],
         'cur'           => $st['cur'],
@@ -1260,6 +1521,26 @@ function oc_werte($st = null)
         'ptest'         => oc_ptest_active(),
         'alter'         => $st['stand'] > 0 ? (int) round((time() - $st['stand']) / 60) : 9999,
     );
+    foreach ((array) (isset($st['regeln']) ? $st['regeln'] : array()) as $r) {
+        $n = (int) $r['nr'];
+        $w['regel' . $n . '_aktiv'] = (int) $r['aktiv'];
+        $w['regel' . $n . '_in']    = (int) $r['in'];
+        $w['regel' . $n . '_rest']  = (int) $r['rest'];
+        $w['regel' . $n . '_ct']    = $r['ct'];
+    }
+    $modus = (string) $cfg['profil_ein'];
+    if ($modus === 'absolut' || $modus === 'beides') {
+        for ($h = 0; $h < 24; $h++) {
+            $w[sprintf('ph%02d', $h)] = isset($st['profil_heute'][$h]) ? $st['profil_heute'][$h] : 0;
+            $w[sprintf('pm%02d', $h)] = isset($st['profil_morgen'][$h]) ? $st['profil_morgen'][$h] : 0;
+        }
+    }
+    if ($modus === 'relativ' || $modus === 'beides') {
+        for ($h = 0; $h < 24; $h++) {
+            $w[sprintf('pr%02d', $h)] = isset($st['profil_relativ'][$h]) ? $st['profil_relativ'][$h] : 0;
+        }
+    }
+    return $w;
 }
 
 function oc_mqtt_publish($st = null)
@@ -1524,7 +1805,7 @@ function oc_vorlage($art = 'mqtt_in')
         $cmds = array();
         foreach (oc_themen() as $k => $info) {
             $cmds[] = array('title' => 'OCTOPUS_' . strtoupper($k),
-                            'comment' => strip_tags(html_entity_decode(oc_t($info[0]), ENT_QUOTES, 'UTF-8')),
+                            'comment' => oc_thema_text($info),
                             'check' => strtoupper($k) . '=\v;');
         }
         return array('octopus_http.xml', oc_xml_virtual_in_http(array(
@@ -1540,8 +1821,7 @@ function oc_vorlage($art = 'mqtt_in')
     foreach (oc_themen() as $k => $info) {
         $cmds[] = array(
             'title'   => $praefix . '_' . $k,
-            'comment' => strip_tags(html_entity_decode(oc_t($info[0]), ENT_QUOTES, 'UTF-8'))
-                       . ($info[1] !== '' ? ' [' . $info[1] . ']' : ''),
+            'comment' => oc_thema_text($info) . ($info[1] !== '' ? ' [' . $info[1] . ']' : ''),
             'check'   => ' ',
         );
     }

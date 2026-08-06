@@ -139,6 +139,31 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST' && isset($_POST['save'])) {
     $oc_neu['cheap']          = $oc_z('cheap', 20.0, 0, 200);
     $oc_neu['expensive']      = $oc_z('expensive', 35.0, 0, 400);
     $oc_neu['window']         = $oc_g('window', 3, 1, 12);
+    $oc_pm = (string) (isset($_POST['profil_ein']) ? $_POST['profil_ein'] : 'aus');
+    $oc_neu['profil_ein'] = in_array($oc_pm, array('aus', 'absolut', 'relativ', 'beides'), true) ? $oc_pm : 'aus';
+    // ---- Schaltregeln ----
+    $oc_neu['regeln'] = array();
+    for ($oc_i = 0; $oc_i < OC_REGELN; $oc_i++) {
+        $oc_r = function ($feld, $def = '') use ($oc_i) {
+            $a = isset($_POST[$feld]) ? (array) $_POST[$feld] : array();
+            return isset($a[$oc_i]) ? $a[$oc_i] : $def;
+        };
+        $oc_art = (string) $oc_r('r_art', 'fenster');
+        $oc_neu['regeln'][$oc_i] = array(
+            'aktiv' => (int) $oc_r('r_aktiv', 0) ? 1 : 0,
+            // Der Name landet im Kommentar der Loxone-Vorlage - deshalb nur
+            // Steuerzeichen und Anfuehrungszeichen raus, nicht hart filtern.
+            'name' => trim(preg_replace('/[\x00-\x1F\x7F"]/', '', (string) $oc_r('r_name'))),
+            'art' => in_array($oc_art, array('fenster', 'stunden', 'schwelle', 'mittel'), true) ? $oc_art : 'fenster',
+            'n' => max(1, min(12, (int) $oc_r('r_n', 3))),
+            'von' => max(0, min(23, (int) $oc_r('r_von', 0))),
+            'bis' => max(0, min(23, (int) $oc_r('r_bis', 0))),
+            'horizont' => max(1, min(48, (int) $oc_r('r_horizont', 24))),
+            'schwelle' => max(-100, min(200, (float) str_replace(',', '.', (string) $oc_r('r_schwelle', 20)))),
+            'prozent' => max(0, min(90, (int) $oc_r('r_prozent', 20))),
+            'neg' => (int) $oc_r('r_neg', 0) ? 1 : 0,
+        );
+    }
     if ($oc_neu['cheap'] >= $oc_neu['expensive']) {
         $oc_fehler[] = oc_t('MELDUNG.SCHWELLEN');
         $oc_neu['cheap'] = $oc_cfg['cheap'];
@@ -561,6 +586,58 @@ if ($oc_rahmen) {
   </div>
 </div>
 
+<h2><?php echo oc_t('REGEL.H_TITEL'); ?></h2>
+<div class="sm-hinweis"><?php echo oc_t('REGEL.ERKLAERUNG'); ?></div>
+<?php for ($oc_i = 0; $oc_i < OC_REGELN; $oc_i++) {
+    $oc_rr = $oc_cfg['regeln'][$oc_i]; ?>
+<div class="sm-step">
+  <label style="display:inline-flex;align-items:center;gap:8px;font-weight:600;">
+    <input data-role="none" type="checkbox" name="r_aktiv[<?php echo $oc_i; ?>]" value="1" <?php echo !empty($oc_rr['aktiv']) ? 'checked' : ''; ?>>
+    <?php echo sprintf(oc_t('REGEL.L_AKTIV'), $oc_i + 1); ?>
+  </label>
+  <div class="sm-row" style="margin-top:8px;">
+    <div><label><?php echo oc_t('REGEL.L_NAME'); ?></label>
+      <input data-role="none" type="text" name="r_name[<?php echo $oc_i; ?>]" value="<?php echo oc_e($oc_rr['name']); ?>" placeholder="<?php echo oc_t('REGEL.P_NAME'); ?>"></div>
+    <div><label><?php echo oc_t('REGEL.L_ART'); ?></label>
+      <select data-role="none" name="r_art[<?php echo $oc_i; ?>]">
+<?php foreach (array('fenster', 'stunden', 'schwelle', 'mittel') as $oc_a) { ?>
+        <option value="<?php echo $oc_a; ?>"<?php echo $oc_rr['art'] === $oc_a ? ' selected' : ''; ?>><?php echo oc_e(oc_t('REGEL.ART_' . strtoupper($oc_a))); ?></option>
+<?php } ?>
+      </select></div>
+  </div>
+  <div class="sm-row">
+    <div><label><?php echo oc_t('REGEL.L_N'); ?></label>
+      <input data-role="none" type="number" name="r_n[<?php echo $oc_i; ?>]" value="<?php echo (int) $oc_rr['n']; ?>" min="1" max="12"></div>
+    <div><label><?php echo oc_t('REGEL.L_SCHWELLE'); ?></label>
+      <input data-role="none" type="text" name="r_schwelle[<?php echo $oc_i; ?>]" value="<?php echo oc_e($oc_rr['schwelle']); ?>"></div>
+    <div><label><?php echo oc_t('REGEL.L_PROZENT'); ?></label>
+      <input data-role="none" type="number" name="r_prozent[<?php echo $oc_i; ?>]" value="<?php echo (int) $oc_rr['prozent']; ?>" min="0" max="90"></div>
+  </div>
+  <div class="sm-row">
+    <div><label><?php echo oc_t('REGEL.L_VON'); ?></label>
+      <input data-role="none" type="number" name="r_von[<?php echo $oc_i; ?>]" value="<?php echo (int) $oc_rr['von']; ?>" min="0" max="23"></div>
+    <div><label><?php echo oc_t('REGEL.L_BIS'); ?></label>
+      <input data-role="none" type="number" name="r_bis[<?php echo $oc_i; ?>]" value="<?php echo (int) $oc_rr['bis']; ?>" min="0" max="23"></div>
+    <div><label><?php echo oc_t('REGEL.L_HORIZONT'); ?></label>
+      <input data-role="none" type="number" name="r_horizont[<?php echo $oc_i; ?>]" value="<?php echo (int) $oc_rr['horizont']; ?>" min="1" max="48"></div>
+  </div>
+  <label style="display:inline-flex;align-items:center;gap:8px;">
+    <input data-role="none" type="checkbox" name="r_neg[<?php echo $oc_i; ?>]" value="1" <?php echo !empty($oc_rr['neg']) ? 'checked' : ''; ?>>
+    <?php echo oc_t('REGEL.L_NEG'); ?>
+  </label>
+  <div class="sm-hilfe"><?php echo sprintf(oc_t('REGEL.H_AUSGANG'), $oc_i + 1, $oc_i + 1, $oc_i + 1, $oc_i + 1); ?></div>
+</div>
+<?php } ?>
+<div class="sm-feld">
+  <label for="profil_ein"><?php echo oc_t('REGEL.L_PROFIL'); ?></label>
+  <select data-role="none" id="profil_ein" name="profil_ein">
+<?php foreach (array('aus', 'absolut', 'relativ', 'beides') as $oc_pv) { ?>
+    <option value="<?php echo $oc_pv; ?>"<?php echo (string) $oc_cfg['profil_ein'] === $oc_pv ? ' selected' : ''; ?>><?php echo oc_e(oc_t('REGEL.PROFIL_' . strtoupper($oc_pv))); ?></option>
+<?php } ?>
+  </select>
+  <div class="sm-hilfe"><?php echo oc_t('REGEL.H_PROFIL'); ?></div>
+</div>
+
 <h2><?php echo oc_t('EINST.H_CO2'); ?></h2>
 <label style="display:inline-flex;align-items:center;gap:6px;font-weight:600;">
   <input data-role="none" type="checkbox" name="co2_enabled" <?php echo !empty($oc_cfg['co2_enabled']) ? 'checked' : ''; ?>>
@@ -788,6 +865,32 @@ for ($oc_i = 0; $oc_i < 12; $oc_i++) { ?>
 
 <!-- ==================== Reiter: Einbindung in Loxone ==================== -->
 <div class="sm-seite" id="tab-loxone">
+<h2><?php echo oc_t('EM.H_TITEL'); ?></h2>
+<div class="sm-hinweis"><?php echo oc_t('EM.EINLEITUNG'); ?></div>
+
+<div class="sm-step"><b><?php echo oc_t('EM.H_SPOTOPT'); ?></b><br>
+<?php echo oc_t('EM.SPOTOPT_TEXT'); ?>
+<table class="sm-tbl">
+<tr><th><?php echo oc_t('EM.T_VONHIER'); ?></th><th><?php echo oc_t('EM.T_ANSCHLUSS'); ?></th><th><?php echo oc_t('EM.T_BEDEUTUNG'); ?></th></tr>
+<tr><td><span class="sm-mono">ph00 &hellip; ph23</span></td><td><span class="sm-mono">00:00 &hellip; 23:00</span></td><td><?php echo oc_t('EM.Z_ABSOLUT'); ?></td></tr>
+<tr><td><span class="sm-mono">pr00 &hellip; pr23</span></td><td><span class="sm-mono">+0 &hellip; +23</span></td><td><?php echo oc_t('EM.Z_RELATIV'); ?></td></tr>
+<tr><td><span class="sm-mono">&ndash;</span></td><td><span class="sm-mono">Tr</span></td><td><?php echo oc_t('EM.Z_TRIGGER'); ?></td></tr>
+</table>
+<div class="sm-warnung"><?php echo oc_t('EM.SPOTOPT_WARNUNG'); ?></div>
+</div>
+
+<div class="sm-step"><b><?php echo oc_t('EM.H_EM'); ?></b><br>
+<?php echo oc_t('EM.EM_TEXT'); ?>
+<table class="sm-tbl">
+<tr><th><?php echo oc_t('EM.T_VONHIER'); ?></th><th><?php echo oc_t('EM.T_ANSCHLUSS'); ?></th><th><?php echo oc_t('EM.T_BEDEUTUNG'); ?></th></tr>
+<tr><td><span class="sm-mono">regel1_aktiv &hellip;</span></td><td><span class="sm-mono">Prio</span></td><td><?php echo oc_t('EM.Z_PRIO'); ?></td></tr>
+<tr><td><span class="sm-mono">regel1_aktiv &hellip;</span></td><td><span class="sm-mono">O</span></td><td><?php echo oc_t('EM.Z_OFFSET'); ?></td></tr>
+<tr><td><span class="sm-mono">regel1_aktiv &hellip;</span></td><td><span class="sm-mono">MinSoc</span></td><td><?php echo oc_t('EM.Z_MINSOC'); ?></td></tr>
+<tr><td><span class="sm-mono">regel1_aktiv &hellip;</span></td><td><span class="sm-mono">Off</span></td><td><?php echo oc_t('EM.Z_OFF'); ?></td></tr>
+</table>
+<div class="sm-hinweis"><?php echo oc_t('EM.EM_HINWEIS'); ?></div>
+</div>
+
 <h2><?php echo oc_t('LOX.H_SCHRITTE'); ?></h2>
 
 <div class="sm-step"><b><?php echo oc_t('LOX.S1_T'); ?></b><br><?php echo oc_t('LOX.S1'); ?></div>

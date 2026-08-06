@@ -7,6 +7,34 @@ HTTP-Endpunkt als Rückfallebene.
 
 ---
 
+## Neu in 0.9.1: Schaltregeln
+
+Bis 0.9.0 lieferte das Plugin nur **Zahlen** — Startzeit, Minuten bis dahin,
+Durchschnittspreis. Daraus „jetzt laden" zu machen war Arbeit im Miniserver.
+
+Eine **Schaltregel** beantwortet die Frage hier und gibt ein fertiges
+0/1-Signal aus. Vier Arten stehen zur Wahl:
+
+| Art | Bedeutung |
+|---|---|
+| Fenster | die N günstigsten Stunden **am Stück** |
+| Stunden | die N günstigsten **vollen** Stunden |
+| Mittel | Preis X % unter dem Tagesmittel |
+| Schwelle | Preis unter einem festen Wert |
+
+Dazu je Regel ein Zeitfenster, ein Horizont und wahlweise ein absolutes,
+relatives oder kombiniertes Profil.
+
+**Und eine Anleitung, welcher Loxone-Baustein wozu passt.** Zwei kommen in
+Frage, und sie tun *nicht* dasselbe: der **Spot Price Optimizer** rechnet mit
+Preisen und schaltet in den günstigsten Stunden; der **Energiemanager**
+verteilt Überschuss und kennt überhaupt keinen Preis — dort wirken die Regeln
+nur mittelbar. Beim Optimizer ist außerdem zu beachten, dass er Werte aus einem
+virtuellen HTTP-Eingang nur benutzt, wenn sie **innerhalb der laufenden
+Stunde** aktualisiert wurden.
+
+---
+
 ## Was noch nicht geprüft ist
 
 **Dieses Plugin wurde nie gegen einen echten Octopus-Vertrag gefahren.** Der
@@ -206,10 +234,9 @@ erfassten Tag belastbarer. Die Anzahl der zugrunde liegenden Monate steht
 Das Auto-Update ist eingeschaltet und zeigt auf **dieses** Repository — nicht
 auf einen fremden Stand, denn sonst böte LoxBerry irgendwann ein Downgrade an.
 
-Die Fassung steht bewusst weiterhin auf `0.9.0`, solange die beiden
-Cloud-Abfragen nicht an einem echten Vertrag erprobt sind. Es wird deshalb
-niemandem ein Update angeboten (0.9.0 = 0.9.0); sobald `1.0.0` erscheint,
-greift die Aktualisierung von selbst.
+Die Fassung bleibt bewusst **unter 1.0.0**, solange die beiden Cloud-Abfragen
+nicht an einem echten Vertrag erprobt sind. Wer 0.9.0 installiert hat, bekommt
+0.9.1 angeboten; sobald `1.0.0` erscheint, greift die Aktualisierung ebenso.
 
 Bei jedem Release müssen **drei Stellen** zusammenpassen, sonst greift das
 Auto-Update nicht:
