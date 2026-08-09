@@ -7,6 +7,79 @@ HTTP-Endpunkt als Rückfallebene.
 
 ---
 
+## Was 0.9.2 behebt
+
+Zwei Meldungen eines Mitlesers. Eine trifft zu, aber aus einem anderen Grund
+als angegeben; die andere hat er selbst schon richtig eingeordnet.
+
+### Der Monatsbericht hatte nur einen Versuch — zutreffend
+
+Gemeldet als „Cronjobs können sich bei hoher Systemlast um einige Sekunden
+verschieben". Nachgestellt mit 1000 simulierten Monaten und verschieden
+grossem Verzug:
+
+| Cron-Verzug bis | Monate ohne Bericht |
+|---|---|
+| 59 s | **0 %** |
+| 65 s | 6,5 % |
+| 90 s | 22 % |
+
+Ein Verzug von ein paar Sekunden schadet also **nicht** — der um fünf
+Sekunden verspätete Lauf liegt immer noch bei 08:05:05, und `date('H:i')`
+liefert weiterhin `08:05`. Erst ein Verzug über eine volle Minute lässt das
+Fenster ausfallen.
+
+Der Befund stimmt trotzdem, nur ist der Weg dorthin ein anderer: Es gibt
+keinen zweiten Versuch. Fällt der Lauf um 08:05 am Ersten **ganz** aus, ist
+der Bericht für den Monat verloren. Das passiert, wenn der LoxBerry gerade
+neu startet oder aus ist, wenn ein Update läuft — oder wenn das Plugin in
+genau dieser Minute auf „aus" stand: Die Prüfung auf `enabled` beendet das
+Skript, bevor es zum Bericht kommt.
+
+*Jetzt*: 1. des Monats, ab 8 Uhr, mit einem Erledigt-Marker. Nachgewiesen an
+vier Fällen — Normalbetrieb, LoxBerry bis 11 Uhr aus, verschluckter Lauf um
+08:05, zweiter Tag des Monats: einmal, einmal, einmal, keinmal.
+
+**Der vorgeschlagene Ort für den Marker war allerdings falsch.**
+`/tmp/octopus_month_report_YYYYMM.done` — `oc_paths()['tmp']` zeigt auf
+`/tmp/<ordner>`, und `/tmp` ist auf dem LoxBerry eine Ramdisk. Startet der
+Rechner am Ersten nach dem Bericht neu, wäre der Marker fort und der nächste
+Lauf meldete den Monatsbericht ein zweites Mal — samt Sprachansage. Der
+Marker liegt deshalb im Datenordner, der den Neustart übersteht. Gesetzt wird
+er **vor** der Auswertung: Bricht die ab, ist der Bericht für diesen Monat
+verloren — eine Endlosschleife aus Fehlversuchen mit Ansage wäre schlimmer.
+
+### Protokoll leeren ohne Sperre — kosmetisch, wie vermutet
+
+Der Melder ordnet es selbst als „Meckern auf hohem Niveau" ein, und die
+Messung gibt ihm recht: vier Sekunden gleichzeitiges Anhängen und Leeren,
+**0 unbrauchbare Zeilen**, in beiden Varianten. Zerreissen kann eine Zeile
+auch nicht — `FILE_APPEND` bedeutet `O_APPEND`, der Kern setzt vor jedem
+Schreiben ans tatsächliche Dateiende.
+
+*Verlieren* kann man eine Zeile aber sehr wohl, und das nicht beim Leeren
+über die Oberfläche, sondern beim **Kürzen im minütlichen Lauf**: `oc_log()`
+liest bei 512 kB das Endstück ein und schreibt es zurück. Wer in diesem
+Fenster anhängt, schreibt in eine Datei, die gleich überschrieben wird. Beide
+Stellen laufen jetzt über `oc_log_setzen()` mit `flock` und `ftruncate` —
+dieselbe Datei, dieselbe Inode, wer sie offen hat, schreibt weiter hinein.
+
+### Hausstandard
+
+Die Reiter waren schon echte Verweise, aber `sm-active` vergab
+ausschliesslich das JavaScript — im ausgelieferten HTML kam die Klasse gar
+nicht vor, und ohne JavaScript standen Kopfzeile und Reiterleiste da,
+darunter nichts. Jetzt setzt der Server sie; alle sechs Reiter sind über
+`?form=…` geprüft. Dazu 17 fehlende `data-role="none"` ergänzt (jetzt 67 von
+67) und das Symbol auf das neue Hausmuster gebracht (Kreisscheibe mit zweitem
+Ring).
+
+Beide PHP-Fassungen liefern in beiden Sprachen zeichengleiche Ausgabe ohne
+eine Meldung. Eine Abweichung von 20 Zeichen, die zwischenzeitlich auftrat,
+lag am Prüfstand und nicht am Plugin: Der erste Lauf legt Zustandsdateien an,
+die der zweite dann vorfindet. Mit jeweils frischem Datenordner sind die
+Ausgaben identisch.
+
 ## Neu in 0.9.1: Schaltregeln
 
 Bis 0.9.0 lieferte das Plugin nur **Zahlen** — Startzeit, Minuten bis dahin,

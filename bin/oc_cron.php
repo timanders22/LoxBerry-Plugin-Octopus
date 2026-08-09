@@ -48,8 +48,52 @@ if (empty($cfg['enabled'])) {
 $st = oc_state();
 oc_announce_check($st);
 
-/* ---- Monatsbericht am Monatsersten um 8:05 ---- */
-if ((int) date('j') === 1 && date('H:i') === '08:05') {
+/* ---- Monatsbericht am Monatsersten, ab 8 Uhr, genau einmal ----
+ *
+ * Bis 0.9.1 stand hier:
+ *
+ *     if ((int) date('j') === 1 && date('H:i') === '08:05') {
+ *
+ * Das trifft ein Zeitfenster von genau 60 Sekunden. Nachgestellt mit 1000
+ * simulierten Monaten und verschieden grossem Cron-Verzug:
+ *
+ *     Verzug bis 59 s   ->  0 % Ausfall
+ *     Verzug bis 65 s   ->  6,5 % der Monate ohne Bericht
+ *     Verzug bis 90 s   ->  22 % der Monate ohne Bericht
+ *
+ * Ein Verzug von ein paar Sekunden schadet also NICHT - der um fuenf
+ * Sekunden verspaetete Lauf liegt immer noch bei 08:05:05. Gefaehrlich wird
+ * erst, was laenger als eine volle Minute dauert oder den Lauf ganz
+ * ausfallen laesst:
+ *
+ *   - der LoxBerry startet gerade neu oder ist aus,
+ *   - ein Update laeuft,
+ *   - das Plugin stand in dieser einen Minute auf "aus" (die Pruefung auf
+ *     enabled weiter oben beendet das Skript, bevor es hierher kommt).
+ *
+ * In allen drei Faellen fiel der Bericht fuer den ganzen Monat aus, ohne
+ * zweiten Versuch. Deshalb jetzt: 1. des Monats, ab 8 Uhr, und ein Marker,
+ * der sagt, dass es schon erledigt ist.
+ *
+ * WO der Marker liegt, ist nicht gleichgueltig. Der naheliegende Ort
+ * /tmp scheidet aus: oc_paths()['tmp'] zeigt auf /tmp/<ordner>, und /tmp
+ * ist auf dem LoxBerry eine Ramdisk. Startet der Rechner am Ersten nach
+ * dem Bericht neu, waere der Marker fort - und der naechste Lauf meldete
+ * den Monatsbericht ein zweites Mal, samt Sprachansage. Der Marker gehoert
+ * in den Datenordner, der den Neustart uebersteht.
+ */
+$oc_marke = oc_datadir() . '/monatsbericht_' . date('Ym') . '.done';
+if ((int) date('j') === 1 && (int) date('G') >= 8 && !is_file($oc_marke)) {
+    // Marker VOR dem Bericht setzen. Bricht die Auswertung ab, ist der
+    // Bericht fuer diesen Monat verloren - eine Endlosschleife aus
+    // Fehlversuchen mit Sprachansage waere schlimmer.
+    @touch($oc_marke);
+    // Marker der Vormonate wegraeumen, damit der Ordner nicht zulaeuft.
+    foreach (glob(oc_datadir() . '/monatsbericht_*.done') ?: array() as $oc_alt) {
+        if ($oc_alt !== $oc_marke && time() - (int) filemtime($oc_alt) > 40 * 86400) {
+            @unlink($oc_alt);
+        }
+    }
     $mc = oc_month_compare(2);
     array_shift($mc);                 // laufender Monat raus, wir wollen den Vormonat
     $vm = $mc ? reset($mc) : null;

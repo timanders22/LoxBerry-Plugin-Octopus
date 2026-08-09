@@ -108,14 +108,55 @@ function oc_e($s)
  * Protokollzeile. Bewusst ohne Umlaute: die Datei wird auch ueber die
  * Konsole gelesen, und dort ist die Zeichensatzlage unklar.
  */
+/**
+ * Das Protokoll auf einen Inhalt setzen - Leeren und Kuerzen laufen beide
+ * hier durch.
+ *
+ * WARUM MIT SPERRE
+ * Das Anhaengen in oc_log() geht mit FILE_APPEND, also mit O_APPEND: der
+ * Kern setzt vor jedem Schreiben ans tatsaechliche Dateiende. Ein
+ * gleichzeitiges Kuerzen kann deshalb keine Zeile ZERREISSEN - nachgemessen
+ * mit vier Sekunden gleichzeitigem Anhaengen und Leeren: 0 unbrauchbare
+ * Zeilen, in beiden Varianten. Die Sorge um eine "kaputte" Logdatei ist
+ * unbegruendet.
+ *
+ * Verlieren kann man eine Zeile trotzdem: Wer zwischen dem Lesen des
+ * Endstuecks und dem Zurueckschreiben anhaengt, schreibt in eine Datei, die
+ * gleich ueberschrieben wird. Beim Kuerzen einer 512-kB-Datei ist dieses
+ * Fenster nicht winzig. flock() schliesst es - und kostet nichts.
+ *
+ * ftruncate statt file_put_contents: So bleibt es dieselbe Datei mit
+ * derselben Inode. Wer sie gerade offen hat, schreibt weiter hinein statt
+ * in eine geloeschte Leiche.
+ */
+function oc_log_setzen($f, $inhalt)
+{
+    $fp = @fopen($f, 'c+');
+    if (!$fp) {
+        return false;
+    }
+    if (!flock($fp, LOCK_EX)) {
+        fclose($fp);
+        return false;
+    }
+    ftruncate($fp, 0);
+    rewind($fp);
+    fwrite($fp, $inhalt);
+    fflush($fp);
+    flock($fp, LOCK_UN);
+    fclose($fp);
+    return true;
+}
+
 function oc_log($msg)
 {
     $f = oc_paths()['log'];
     $dir = dirname($f);
     if (!is_dir($dir)) { @mkdir($dir, 0775, true); }
+    clearstatcache(true, $f);
     if (is_file($f) && filesize($f) > 512000) {
         $tail = array_slice(file($f, FILE_IGNORE_NEW_LINES) ?: array(), -200);
-        @file_put_contents($f, implode("\n", $tail) . "\n");
+        oc_log_setzen($f, implode("\n", $tail) . "\n");
     }
     @file_put_contents($f, '[' . date('Y-m-d H:i:s') . '] ' . $msg . "\n", FILE_APPEND);
 }

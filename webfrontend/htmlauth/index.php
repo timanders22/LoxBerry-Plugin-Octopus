@@ -69,7 +69,9 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST' && isset($_POST['download'])) {
 /* ================= Protokoll leeren ================= */
 if ($_SERVER['REQUEST_METHOD'] === 'POST' && isset($_POST['clearlog'])) {
     @mkdir(dirname($oc_p['log']), 0775, true);
-    @file_put_contents($oc_p['log'], '[' . date('Y-m-d H:i:s') . "] Protokoll geleert (Oberflaeche)\n");
+    // Ueber oc_log_setzen(): dieselbe Sperre wie beim Kuerzen im Cron-Lauf,
+    // damit sich Leeren und Anhaengen nicht in die Quere kommen.
+    oc_log_setzen($oc_p['log'], '[' . date('Y-m-d H:i:s') . "] Protokoll geleert (Oberflaeche)\n");
     $oc_tab = 'tab-log';
 }
 
@@ -490,23 +492,44 @@ if ($oc_rahmen) {
 <?php } ?>
 
 <!-- Reiterleiste: echte Links, JavaScript faengt den Klick ab. -->
+<?php
+/*
+ * Die Reiter waren schon echte Verweise - was fehlte, war die Klasse
+ * sm-active AUF DEM SERVER.
+ *
+ * .sm-seite steht auf display:none, sichtbar wird eine Flaeche erst durch
+ * .sm-active. Diese Klasse vergab bis 0.9.1 ausschliesslich das JavaScript
+ * am Seitenende; im ausgelieferten HTML kam sm-active gar nicht vor. Ohne
+ * JavaScript standen Kopfzeile und Reiterleiste da, darunter nichts.
+ *
+ * $oc_tab wurde serverseitig laengst ermittelt und nur ans JavaScript
+ * weitergereicht. Diese Liste, die Positivliste in $oc_muster und die id
+ * der Flaechen muessen deckungsgleich bleiben - alle drei.
+ */
+$oc_reiter = array(
+    'tab-settings' => oc_t('REITER.EINSTELLUNGEN'),
+    'tab-mqtt'     => oc_t('REITER.MQTT'),
+    'tab-loxone'   => oc_t('REITER.LOXONE'),
+    'tab-costs'    => oc_t('REITER.KOSTEN'),
+    'tab-test'     => oc_t('REITER.TEST'),
+    'tab-log'      => oc_t('REITER.LOG'),
+);
+?>
 <div class="sm-tabs">
-    <a class="sm-tab" data-ziel="tab-settings" href="index.php?form=settings"><?php echo oc_t('REITER.EINSTELLUNGEN'); ?></a>
-    <a class="sm-tab" data-ziel="tab-mqtt"     href="index.php?form=mqtt"><?php echo oc_t('REITER.MQTT'); ?></a>
-    <a class="sm-tab" data-ziel="tab-loxone"   href="index.php?form=loxone"><?php echo oc_t('REITER.LOXONE'); ?></a>
-    <a class="sm-tab" data-ziel="tab-costs"    href="index.php?form=costs"><?php echo oc_t('REITER.KOSTEN'); ?></a>
-    <a class="sm-tab" data-ziel="tab-test"     href="index.php?form=test"><?php echo oc_t('REITER.TEST'); ?></a>
-    <a class="sm-tab" data-ziel="tab-log"      href="index.php?form=log"><?php echo oc_t('REITER.LOG'); ?></a>
+<?php foreach ($oc_reiter as $oc_id => $oc_bez) { ?>
+    <a class="sm-tab<?php echo $oc_tab === $oc_id ? ' sm-active' : ''; ?>" data-ziel="<?php echo oc_e($oc_id); ?>"
+       href="index.php?form=<?php echo oc_e(substr($oc_id, 4)); ?>"><?php echo $oc_bez; ?></a>
+<?php } ?>
 </div>
 
 <!-- ==================== Reiter: Einstellungen ==================== -->
-<div class="sm-seite" id="tab-settings">
+<div class="sm-seite<?php echo $oc_tab === 'tab-settings' ? ' sm-active' : ''; ?>" id="tab-settings">
 
 <h2><?php echo oc_t('EINST.H_ZUGANG'); ?></h2>
 <div class="sm-hinweis"><?php echo oc_t('EINST.ZUGANG_ERKLAERUNG'); ?></div>
 <form action="index.php" method="post" autocomplete="off">
-<input type="hidden" name="save_zugang" value="1">
-<input type="hidden" name="activetab" value="tab-settings">
+<input data-role="none" type="hidden" name="save_zugang" value="1">
+<input data-role="none" type="hidden" name="activetab" value="tab-settings">
 <div class="sm-reihe">
   <div>
     <label><?php echo oc_t('EINST.EMAIL'); ?></label>
@@ -534,15 +557,15 @@ if ($oc_rahmen) {
   <?php echo oc_t('EINST.ZUGANG_LOESCHEN'); ?>
 </label>
 <div class="sm-knopfreihe">
-  <button class="sm-btn sm-b-lesen" type="submit"><?php echo oc_t('EINST.ZUGANG_SPEICHERN'); ?></button>
+  <button data-role="none" class="sm-btn sm-b-lesen" type="submit"><?php echo oc_t('EINST.ZUGANG_SPEICHERN'); ?></button>
 </div>
 <div class="sm-hilfe"><?php echo str_replace('%F%',
     '<span class="sm-mono">' . oc_e($oc_p['zugang']) . '</span>', oc_t('EINST.ZUGANG_DATEI')); ?></div>
 </form>
 
 <form action="index.php" method="post" autocomplete="off">
-<input type="hidden" name="save" value="1">
-<input type="hidden" name="activetab" value="tab-settings">
+<input data-role="none" type="hidden" name="save" value="1">
+<input data-role="none" type="hidden" name="activetab" value="tab-settings">
 
 <h2><?php echo oc_t('EINST.H_BETRIEB'); ?></h2>
 <label style="display:inline-flex;align-items:center;gap:6px;font-weight:600;">
@@ -813,13 +836,13 @@ for ($oc_i = 0; $oc_i < 12; $oc_i++) { ?>
 </div>
 
 <div class="sm-knopfreihe">
-  <button class="sm-btn sm-b-lesen" type="submit"><?php echo oc_t('ALLGEMEIN.SPEICHERN'); ?></button>
+  <button data-role="none" class="sm-btn sm-b-lesen" type="submit"><?php echo oc_t('ALLGEMEIN.SPEICHERN'); ?></button>
 </div>
 </form>
 </div><!-- /tab-settings -->
 
 <!-- ==================== Reiter: MQTT ==================== -->
-<div class="sm-seite" id="tab-mqtt">
+<div class="sm-seite<?php echo $oc_tab === 'tab-mqtt' ? ' sm-active' : ''; ?>" id="tab-mqtt">
 <h2><?php echo oc_t('MQTT.H_ZUSTAND'); ?></h2>
 <div class="sm-hinweis"><?php echo oc_t('MQTT.GATEWAY_ERKLAERUNG'); ?></div>
 <table class="sm-tbl">
@@ -864,7 +887,7 @@ for ($oc_i = 0; $oc_i < 12; $oc_i++) { ?>
 </div><!-- /tab-mqtt -->
 
 <!-- ==================== Reiter: Einbindung in Loxone ==================== -->
-<div class="sm-seite" id="tab-loxone">
+<div class="sm-seite<?php echo $oc_tab === 'tab-loxone' ? ' sm-active' : ''; ?>" id="tab-loxone">
 <h2><?php echo oc_t('EM.H_TITEL'); ?></h2>
 <div class="sm-hinweis"><?php echo oc_t('EM.EINLEITUNG'); ?></div>
 
@@ -910,10 +933,10 @@ for ($oc_i = 0; $oc_i < 12; $oc_i++) { ?>
 <?php } ?>
 </table>
 <form action="index.php" method="post" style="margin-top:8px;">
-<input type="hidden" name="activetab" value="tab-loxone">
+<input data-role="none" type="hidden" name="activetab" value="tab-loxone">
 <div class="sm-knopfreihe">
-  <button class="sm-btn sm-b-lesen" type="submit" name="download" value="mqtt_in"><?php echo oc_t('LOX.DL_MQTT'); ?></button>
-  <button class="sm-btn sm-b-technik" type="submit" name="download" value="http_in"><?php echo oc_t('LOX.DL_HTTP'); ?></button>
+  <button data-role="none" class="sm-btn sm-b-lesen" type="submit" name="download" value="mqtt_in"><?php echo oc_t('LOX.DL_MQTT'); ?></button>
+  <button data-role="none" class="sm-btn sm-b-technik" type="submit" name="download" value="http_in"><?php echo oc_t('LOX.DL_HTTP'); ?></button>
 </div>
 </form>
 <div class="sm-hilfe"><?php echo oc_t('LOX.DL_HILFE'); ?></div>
@@ -970,7 +993,7 @@ foreach ($oc_bausteine as $oc_b) { ?>
 </div><!-- /tab-loxone -->
 
 <!-- ==================== Reiter: Kostenvergleich ==================== -->
-<div class="sm-seite" id="tab-costs">
+<div class="sm-seite<?php echo $oc_tab === 'tab-costs' ? ' sm-active' : ''; ?>" id="tab-costs">
 <h2><?php echo oc_t('KOST.H_JAHR'); ?></h2>
 <div class="sm-hilfe"><?php echo str_replace(array('%N%', '%S%'),
     array((int) $oc_kos['monate_gemessen'], oc_n($oc_kos['schnitt'], 2)),
@@ -1043,7 +1066,7 @@ foreach (array_reverse($oc_hist) as $oc_r) { ?>
 </div><!-- /tab-costs -->
 
 <!-- ==================== Reiter: Test ==================== -->
-<div class="sm-seite" id="tab-test">
+<div class="sm-seite<?php echo $oc_tab === 'tab-test' ? ' sm-active' : ''; ?>" id="tab-test">
 <h2><?php echo oc_t('TEST.H_PRUEFUNG'); ?></h2>
 <div class="sm-legende">
 <span><i class="sm-punkt sm-b-lesen"></i> <?php echo oc_t('LEGENDE.LESEN'); ?></span>
@@ -1054,14 +1077,14 @@ foreach (array_reverse($oc_hist) as $oc_r) { ?>
 <div class="sm-knopfreihe">
 <?php foreach (array('selbst' => 'TEST.K_SELBST', 'abruf' => 'TEST.K_ABRUF',
                      'anmeldung' => 'TEST.K_ANMELDUNG') as $oc_a => $oc_l) { ?>
-  <form action="index.php" method="post"><input type="hidden" name="activetab" value="tab-test">
-  <button class="sm-btn sm-b-lesen" type="submit" name="test" value="<?php echo $oc_a; ?>"><?php echo oc_t($oc_l); ?></button></form>
+  <form action="index.php" method="post"><input data-role="none" type="hidden" name="activetab" value="tab-test">
+  <button data-role="none" class="sm-btn sm-b-lesen" type="submit" name="test" value="<?php echo $oc_a; ?>"><?php echo oc_t($oc_l); ?></button></form>
 <?php } ?>
 </div>
 <div class="sm-knopfreihe">
 <?php foreach (array('gateway' => 'TEST.K_GATEWAY', 'endpunkt' => 'TEST.K_ENDPUNKT') as $oc_a => $oc_l) { ?>
-  <form action="index.php" method="post"><input type="hidden" name="activetab" value="tab-test">
-  <button class="sm-btn sm-b-technik" type="submit" name="test" value="<?php echo $oc_a; ?>"><?php echo oc_t($oc_l); ?></button></form>
+  <form action="index.php" method="post"><input data-role="none" type="hidden" name="activetab" value="tab-test">
+  <button data-role="none" class="sm-btn sm-b-technik" type="submit" name="test" value="<?php echo $oc_a; ?>"><?php echo oc_t($oc_l); ?></button></form>
 <?php } ?>
 </div>
 
@@ -1070,8 +1093,8 @@ foreach (array_reverse($oc_hist) as $oc_r) { ?>
 <div class="sm-knopfreihe">
 <?php foreach (array('mqtt' => 'TEST.K_MQTT', 'say' => 'TEST.K_SAY',
                      'saytomorrow' => 'TEST.K_SAYTOMORROW', 'ptest' => 'TEST.K_PTEST') as $oc_a => $oc_l) { ?>
-  <form action="index.php" method="post"><input type="hidden" name="activetab" value="tab-test">
-  <button class="sm-btn sm-b-aktion" type="submit" name="test" value="<?php echo $oc_a; ?>"><?php echo oc_t($oc_l); ?></button></form>
+  <form action="index.php" method="post"><input data-role="none" type="hidden" name="activetab" value="tab-test">
+  <button data-role="none" class="sm-btn sm-b-aktion" type="submit" name="test" value="<?php echo $oc_a; ?>"><?php echo oc_t($oc_l); ?></button></form>
 <?php } ?>
 </div>
 
@@ -1082,7 +1105,7 @@ foreach (array_reverse($oc_hist) as $oc_r) { ?>
 </div><!-- /tab-test -->
 
 <!-- ==================== Reiter: Logdateien ==================== -->
-<div class="sm-seite" id="tab-log">
+<div class="sm-seite<?php echo $oc_tab === 'tab-log' ? ' sm-active' : ''; ?>" id="tab-log">
 <h2><?php echo oc_t('LOG.H'); ?></h2>
 <div class="sm-hilfe"><?php echo str_replace('%F%',
     '<span class="sm-mono">' . oc_e($oc_p['log']) . '</span>', oc_t('LOG.DATEI')); ?></div>
@@ -1092,9 +1115,9 @@ if (class_exists('LBWeb', false) && method_exists('LBWeb', 'loglist_html')) {
 }
 ?>
 <form action="index.php" method="post">
-<input type="hidden" name="activetab" value="tab-log">
+<input data-role="none" type="hidden" name="activetab" value="tab-log">
 <div class="sm-knopfreihe">
-  <button class="sm-btn sm-b-aktion" type="submit" name="clearlog" value="1"><?php echo oc_t('LOG.LEEREN'); ?></button>
+  <button data-role="none" class="sm-btn sm-b-aktion" type="submit" name="clearlog" value="1"><?php echo oc_t('LOG.LEEREN'); ?></button>
 </div>
 </form>
 <div class="sm-pre" style="max-height:520px;"><?php
