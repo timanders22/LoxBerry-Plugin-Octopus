@@ -610,8 +610,11 @@ $oc_reiter = array(
   <input data-role="none" type="checkbox" name="zugang_loeschen" value="1">
   <?php echo oc_t('EINST.ZUGANG_LOESCHEN'); ?>
 </label>
+<div class="sm-legende">
+<span><i class="sm-punkt sm-b-aktion"></i><?php echo oc_t('LEGENDE.AKTION'); ?></span>
+</div>
 <div class="sm-knopfreihe">
-  <button data-role="none" class="sm-btn sm-b-lesen" type="submit"><?php echo oc_t('EINST.ZUGANG_SPEICHERN'); ?></button>
+  <button data-role="none" class="sm-btn sm-b-aktion" type="submit"><?php echo oc_t('EINST.ZUGANG_SPEICHERN'); ?></button>
 </div>
 <div class="sm-hilfe"><?php echo str_replace('%F%',
     '<span class="sm-mono">' . oc_e($oc_p['zugang']) . '</span>', oc_t('EINST.ZUGANG_DATEI')); ?></div>
@@ -983,7 +986,7 @@ for ($oc_i = 0; $oc_i < 12; $oc_i++) { ?>
 </div>
 
 <div class="sm-knopfreihe">
-  <button data-role="none" class="sm-btn sm-b-lesen" type="submit"><?php echo oc_t('ALLGEMEIN.SPEICHERN'); ?></button>
+  <button data-role="none" class="sm-btn sm-b-aktion" type="submit"><?php echo oc_t('ALLGEMEIN.SPEICHERN'); ?></button>
 </div>
 </form>
 </div><!-- /tab-settings -->
@@ -1081,6 +1084,10 @@ for ($oc_i = 0; $oc_i < 12; $oc_i++) { ?>
 </table>
 <form action="index.php" method="post" style="margin-top:8px;">
 <input data-role="none" type="hidden" name="activetab" value="tab-loxone">
+<div class="sm-legende">
+<span><i class="sm-punkt sm-b-lesen"></i><?php echo oc_t('LEGENDE.LESEN'); ?></span>
+<span><i class="sm-punkt sm-b-technik"></i><?php echo oc_t('PLAN.LEGENDE_TECHNIK'); ?></span>
+</div>
 <div class="sm-knopfreihe">
   <button data-role="none" class="sm-btn sm-b-lesen" type="submit" name="download" value="mqtt_in"><?php echo oc_t('LOX.DL_MQTT'); ?></button>
   <button data-role="none" class="sm-btn sm-b-technik" type="submit" name="download" value="http_in"><?php echo oc_t('LOX.DL_HTTP'); ?></button>
@@ -1329,6 +1336,9 @@ if (class_exists('LBWeb', false) && method_exists('LBWeb', 'loglist_html')) {
 ?>
 <form action="index.php" method="post">
 <input data-role="none" type="hidden" name="activetab" value="tab-log">
+<div class="sm-legende">
+<span><i class="sm-punkt sm-b-aktion"></i><?php echo oc_t('LEGENDE.AKTION'); ?></span>
+</div>
 <div class="sm-knopfreihe">
   <button data-role="none" class="sm-btn sm-b-aktion" type="submit" name="clearlog" value="1"><?php echo oc_t('LOG.LEEREN'); ?></button>
 </div>
