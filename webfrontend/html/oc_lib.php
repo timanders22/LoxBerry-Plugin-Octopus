@@ -38,6 +38,11 @@ define('OC_API', 'https://api.oeg-kraken.energy/v1/graphql/');
  * abgeleitet - nicht aus der Plugindatenbank. Deren MD5-Schluessel haengt
  * an Autor, E-Mail und Plugin-Name und aendert sich bei jedem Fork.
  */
+/* Der Fahrplaner. Eigene Datei daneben, byteweise gleich mit der im
+ * Spotpreis-aWATTar-Plugin - Frist, Rangfolge, Leistungsbudget und
+ * PV-Gutschrift stecken dort. Naeheres im Kopf von planer.php. */
+require_once __DIR__ . '/planer.php';
+
 function oc_paths()
 {
     static $p = null;
@@ -222,7 +227,17 @@ function oc_vorgaben()
         // Meldungen
         'notify'        => array(),
         'tts'           => array(),
-    );
+        // Fahrplaner (ab 1.0.0): Leistungsbudget und PV-Gutschrift.
+        // Vorgabe 0 heisst jeweils "aus".
+        'pv_quelle'     => '',     // '' | forecast_solar | objekt | liste
+        'pv_url'        => '',
+        'pv_pfad'       => '',
+        'pv_zeitfeld'   => '',
+        'pv_wertfeld'   => '',
+        'pv_einheit'    => 'wh',   // wh | w | kw
+        'soc_url'       => '',
+        'soc_pfad'      => '',
+    ) + plan_global_vorgabe();
 }
 
 function oc_config()
@@ -273,7 +288,27 @@ function oc_config()
         $r['horizont'] = max(1, min(48, (int) $r['horizont']));
         $r['schwelle'] = (float) $r['schwelle'];
         $r['prozent'] = max(0, min(90, (int) $r['prozent']));
+        // Felder des Fahrplaners. Hier wird gekappt, nicht abgewiesen - das
+        // Abweisen macht die Oberflaeche beim Speichern.
+        $r['rang'] = max(1, min(99, (int) $r['rang']));
+        $r['leistung'] = max(0.0, min(100.0, (float) $r['leistung']));
+        $r['energie'] = max(0.0, min(500.0, (float) $r['energie']));
+        $r['frist'] = (int) $r['frist'];
+        if ($r['frist'] < 0 || $r['frist'] > 23) { $r['frist'] = -1; }
+        $r['pv_sperre'] = max(0.0, min(500.0, (float) $r['pv_sperre']));
+        $r['soc_min'] = max(0, min(100, (int) $r['soc_min']));
+        $r['soc_max'] = max(0, min(100, (int) $r['soc_max']));
         $cfg['regeln'][$i] = $r;
+    }
+    // Fahrplaner, global
+    $cfg['budget_kw'] = max(0.0, min(200.0, (float) $cfg['budget_kw']));
+    $cfg['pv_bonus'] = max(0.0, min(100.0, (float) $cfg['pv_bonus']));
+    $cfg['pv_schwelle'] = max(1, min(100000, (int) $cfg['pv_schwelle']));
+    if (!in_array($cfg['pv_quelle'], array('', 'forecast_solar', 'objekt', 'liste'), true)) {
+        $cfg['pv_quelle'] = '';
+    }
+    if (!in_array($cfg['pv_einheit'], array('wh', 'w', 'kw'), true)) {
+        $cfg['pv_einheit'] = 'wh';
     }
     if (!in_array($cfg['profil_ein'], array('aus', 'absolut', 'relativ', 'beides'), true)) {
         $cfg['profil_ein'] = 'aus';
@@ -802,7 +837,7 @@ define('OC_REGELN', 4);
 /** Vorgabe einer Schaltregel. */
 function oc_regel_vorgabe()
 {
-    return array(
+    return array_merge(array(
         'aktiv' => 0,
         'name' => '',
         'art' => 'fenster',   // fenster | stunden | schwelle | mittel
@@ -813,7 +848,7 @@ function oc_regel_vorgabe()
         'schwelle' => 20.0,   // ct/kWh brutto (art = schwelle)
         'prozent' => 20,      // % unter dem Tagesmittel (art = mittel)
         'neg' => 1,           // bei negativem Preis immer einschalten
-    );
+    ), plan_regel_vorgabe());
 }
 
 /** Liegt die Stunde $h im Zeitfenster? von == bis bedeutet: ganzer Tag. */
@@ -933,20 +968,173 @@ function oc_regel_werte($r, $slots, $st)
     return $erg;
 }
 
-/** Alle Regeln auswerten. */
+/* ==================================================================
+ * Fremde Auskuenfte fuer den Fahrplaner
+ *
+ * PV-Prognose und Speicherstand. Das AUSWERTEN steckt in planer.php und
+ * ist dort ohne Netz durchgeprueft; hier steht nur das Holen. Gecacht wird
+ * 15 Minuten - eine Prognose aendert sich nicht schneller, und ein
+ * Fremddienst, den jedes Plugin im Minutentakt fragt, sperrt irgendwann aus.
+ * ================================================================== */
+
+function oc_umwelt($force = false)
+{
+    $cfg = oc_config();
+    $leer = array('pv' => null, 'pv_summe' => null, 'soc' => null,
+                  'pv_meldung' => '', 'soc_meldung' => '', 'ts' => 0);
+    $cache = oc_tmpdir() . '/umwelt.json';
+    if (!$force && is_file($cache) && time() - filemtime($cache) < 900) {
+        $c = json_decode((string) @file_get_contents($cache), true);
+        if (is_array($c)) { return $c + $leer; }
+    }
+    $erg = $leer;
+    $erg['ts'] = time();
+    $jetzt = time() - (time() % 900);
+
+    if ($cfg['pv_quelle'] !== '' && trim((string) $cfg['pv_url']) !== '') {
+        $roh = oc_holen($cfg['pv_url']);
+        if ($roh === null) {
+            $erg['pv_meldung'] = 'NICHT_ERREICHBAR';
+        } else {
+            list($pv, $m) = plan_pv_lesen($roh, $cfg['pv_quelle'], $cfg['pv_pfad'],
+                $cfg['pv_zeitfeld'], $cfg['pv_wertfeld'], $cfg['pv_einheit'], 900);
+            $erg['pv_meldung'] = $m;
+            if ($pv) {
+                $erg['pv'] = $pv;
+                $erg['pv_summe'] = plan_pv_summe($pv, $jetzt, 24);
+            }
+        }
+    }
+
+    if (trim((string) $cfg['soc_url']) !== '') {
+        $roh = oc_holen($cfg['soc_url']);
+        if ($roh === null) {
+            $erg['soc_meldung'] = 'NICHT_ERREICHBAR';
+        } else {
+            list($soc, $m) = plan_soc_lesen($roh, $cfg['soc_pfad']);
+            $erg['soc_meldung'] = $m;
+            $erg['soc'] = $soc;
+        }
+    }
+
+    @file_put_contents($cache, json_encode($erg));
+    return $erg;
+}
+
+/** Eine JSON-Adresse holen. Rueckgabe: Feld oder null. */
+function oc_holen($url)
+{
+    $url = trim((string) $url);
+    if ($url === '' || !preg_match('#^https?://#i', $url)) { return null; }
+    $ctx = stream_context_create(array('http' => array(
+        'timeout' => 12, 'user_agent' => 'LoxBerry Octopus', 'ignore_errors' => true)));
+    $r = @file_get_contents($url, false, $ctx);
+    if ($r === false) { return null; }
+    $d = json_decode($r, true);
+    return is_array($d) ? $d : null;
+}
+
+/**
+ * Den Sperrgrund als Zahl - Loxone rechnet mit Zahlen, nicht mit Woertern.
+ * 0 frei, 1 PV-Prognose, 2 Speicher zu leer, 3 Speicher zu voll.
+ */
+function oc_sperre_zahl($grund)
+{
+    if ($grund === 'pv') { return 1; }
+    if ($grund === 'soc_min') { return 2; }
+    if ($grund === 'soc_max') { return 3; }
+    return 0;
+}
+
+/**
+ * Alle Regeln auswerten - seit 1.0.0 ueber den gemeinsamen Fahrplaner.
+ *
+ * oc_regel_werte() darueber bleibt unveraendert stehen: der Reiter Test
+ * zeigt damit die alte und die neue Rechnung nebeneinander. Der Planer
+ * bringt drei Dinge dazu, die eine einzelne Regel nicht wissen kann - die
+ * Frist, das gemeinsame Leistungsbudget und die PV-Prognose.
+ *
+ * 'in' und 'rest' zaehlen hier wie bisher in MINUTEN; der Planer rechnet
+ * ohnehin in Minuten, es ist also nichts umzurechnen.
+ */
 function oc_regeln($slots, $st)
 {
     $cfg = oc_config();
+    $umwelt = oc_umwelt();
+    // Der Planer will ts => Preis, die Slots tragen ein ganzes Feld.
+    $preise = array();
+    foreach ($slots as $ts => $sl) { $preise[$ts] = (float) $sl['ct']; }
+
+    $fp = plan_rechnen($preise, 900, (int) $st['slotstart'], $cfg['regeln'], array(
+        'pv'       => isset($umwelt['pv']) ? $umwelt['pv'] : null,
+        'pv_summe' => isset($umwelt['pv_summe']) ? $umwelt['pv_summe'] : null,
+        'soc'      => isset($umwelt['soc']) ? $umwelt['soc'] : null,
+        'neg'      => !empty($st['neg']) ? 1 : 0,
+        'mittel'   => (float) $st['heute']['avg'],
+    ), array(
+        'budget_kw'   => $cfg['budget_kw'],
+        'pv_bonus'    => $cfg['pv_bonus'],
+        'pv_schwelle' => $cfg['pv_schwelle'],
+    ));
+
     $out = array();
-    foreach ($cfg['regeln'] as $i => $r) {
-        $w = oc_regel_werte($r, $slots, $st);
-        $w['nr'] = $i + 1;
-        $w['name'] = $r['name'] !== '' ? $r['name'] : ('Regel ' . ($i + 1));
-        $w['art'] = $r['art'];
+    foreach ($fp as $i => $w) {
+        $r = isset($cfg['regeln'][$i]) ? $cfg['regeln'][$i] : array();
+        $w['name'] = (isset($r['name']) && $r['name'] !== '') ? $r['name'] : ('Regel ' . ($i + 1));
+        $w['art'] = isset($r['art']) ? $r['art'] : 'fenster';
         $w['ein'] = empty($r['aktiv']) ? 0 : 1;
+        unset($w['slots']);
         $out[] = $w;
     }
     return $out;
+}
+
+/**
+ * Der Fahrplan MIT den Zeitscheiben - nur fuer die Anzeige.
+ *
+ * oc_regeln() wirft die Scheibenliste weg, weil Loxone sie nicht braucht.
+ * Die Oberflaeche braucht sie sehr wohl: erst daran sieht man, wann welche
+ * Regel laeuft und wie viel Leistung gleichzeitig verplant ist.
+ *
+ * Rueckgabe: array('plan'=>..., 'belegung'=>ts=>kW, 'slotlen'=>Sekunden,
+ *                  'preise'=>ts=>ct)
+ */
+function oc_fahrplan($st = null)
+{
+    $cfg = oc_config();
+    if ($st === null) { $st = oc_state(); }
+    /* oc_preise() liefert eine HUELLE mit den Schluesseln slots, fehler,
+     * demo und stand - nicht die Slots selbst. Wer das verwechselt,
+     * iteriert ueber 'FEHLER_KEIN_ZUGANG' und greift auf ein Zeichen einer
+     * Zeichenkette zu; unter PHP 8 ist das ein TypeError und die ganze
+     * Seite bleibt weiss. Deshalb hier ausdruecklich ['slots'] und je
+     * Eintrag eine Pruefung. */
+    $roh = oc_preise();
+    $slots = (is_array($roh) && isset($roh['slots']) && is_array($roh['slots']))
+        ? $roh['slots'] : array();
+    $preise = array();
+    foreach ($slots as $ts => $sl) {
+        if (is_array($sl) && isset($sl['ct'])) { $preise[(int) $ts] = (float) $sl['ct']; }
+    }
+    ksort($preise);
+    $umwelt = oc_umwelt();
+    $plan = plan_rechnen($preise, 900, (int) $st['slotstart'], $cfg['regeln'], array(
+        'pv'       => isset($umwelt['pv']) ? $umwelt['pv'] : null,
+        'pv_summe' => isset($umwelt['pv_summe']) ? $umwelt['pv_summe'] : null,
+        'soc'      => isset($umwelt['soc']) ? $umwelt['soc'] : null,
+        'neg'      => !empty($st['neg']) ? 1 : 0,
+        'mittel'   => (float) $st['heute']['avg'],
+    ), array(
+        'budget_kw'   => $cfg['budget_kw'],
+        'pv_bonus'    => $cfg['pv_bonus'],
+        'pv_schwelle' => $cfg['pv_schwelle'],
+    ));
+    foreach ($plan as $i => $p) {
+        $plan[$i]['name'] = (isset($cfg['regeln'][$i]['name']) && $cfg['regeln'][$i]['name'] !== '')
+            ? $cfg['regeln'][$i]['name'] : ('Regel ' . ($i + 1));
+    }
+    return array('plan' => $plan, 'belegung' => plan_belegung($plan),
+                 'slotlen' => 900, 'preise' => $preise);
 }
 
 /** Kennzahlen eines Tages aus den Viertelstunden zwischen $von und $bis. */
@@ -1142,8 +1330,24 @@ function oc_state($force = false)
         $st['profil_morgen'][$h] = isset($stdh[$m0 + $h * 3600]) ? $stdh[$m0 + $h * 3600] : 0.0;
         $st['profil_relativ'][$h] = isset($stdh[$hstart + $h * 3600]) ? $stdh[$hstart + $h * 3600] : 0.0;
     }
+    /* Fremde Auskuenfte vor den Regeln - der Planer braucht sie. Ein
+     * Fehlschlag macht den Zustand nicht ungueltig: ohne Prognose plant der
+     * Planer wie vorher, nur ohne Gutschrift. */
+    $umwelt = oc_umwelt();
+    $st['pv_summe'] = isset($umwelt['pv_summe']) ? $umwelt['pv_summe'] : null;
+    $st['soc'] = isset($umwelt['soc']) ? $umwelt['soc'] : null;
+    $st['pv_meldung'] = isset($umwelt['pv_meldung']) ? $umwelt['pv_meldung'] : '';
+    $st['soc_meldung'] = isset($umwelt['soc_meldung']) ? $umwelt['soc_meldung'] : '';
+
     // Zuletzt: die Regeln brauchen neg, slotstart und das Tagesmittel.
     $st['regeln'] = oc_regeln($slots, $st);
+
+    // Verplante Leistung in der laufenden Viertelstunde.
+    $st['planlast'] = 0.0;
+    foreach ($st['regeln'] as $r) {
+        if (!empty($r['aktiv'])) { $st['planlast'] += (float) $r['leistung']; }
+    }
+    $st['planlast'] = round($st['planlast'], 2);
 
     oc_log_if_changed('zustand', 'jetzt=' . $st['cur'] . ' ct rang=' . $st['rank'] . '/' . $st['n']
         . ' niveau=' . $st['level'] . ' morgen=' . $st['tomorrow_ok'] . ' demo=' . $st['demo']);
@@ -1484,7 +1688,15 @@ function oc_themen()
         $t['regel' . $i . '_in']    = array('THEMA.REGEL_IN', 'min', $i, $zusatz);
         $t['regel' . $i . '_rest']  = array('THEMA.REGEL_REST', 'min', $i, $zusatz);
         $t['regel' . $i . '_ct']    = array('THEMA.REGEL_CT', 'ct/kWh', $i, $zusatz);
+        $t['regel' . $i . '_verdraengt'] = array('THEMA.REGEL_VERDRAENGT', '', $i, $zusatz);
+        $t['regel' . $i . '_sperre'] = array('THEMA.REGEL_SPERRE', '', $i, $zusatz);
+        $t['regel' . $i . '_rang']   = array('THEMA.REGEL_RANG', '', $i, $zusatz);
     }
+    // Fahrplaner, global
+    $t['plan_budget'] = array('THEMA.PLAN_BUDGET', 'kW');
+    $t['plan_last']   = array('THEMA.PLAN_LAST', 'kW');
+    $t['plan_pv']     = array('THEMA.PLAN_PV', 'kWh');
+    $t['plan_soc']    = array('THEMA.PLAN_SOC', '%');
     // Stundenprofil fuer den Spot Price Optimizer.
     $modus = (string) $cfg['profil_ein'];
     if ($modus === 'absolut' || $modus === 'beides') {
@@ -1568,7 +1780,17 @@ function oc_werte($st = null)
         $w['regel' . $n . '_in']    = (int) $r['in'];
         $w['regel' . $n . '_rest']  = (int) $r['rest'];
         $w['regel' . $n . '_ct']    = $r['ct'];
+        // Fahrplaner. VERD und SPERRE beantworten die Frage, die sonst im
+        // Dunkeln bleibt: warum laeuft es gerade NICHT?
+        $w['regel' . $n . '_verdraengt'] = isset($r['verdraengt']) ? (int) $r['verdraengt'] : 0;
+        $w['regel' . $n . '_sperre'] = oc_sperre_zahl(isset($r['gesperrt']) ? $r['gesperrt'] : '');
+        $w['regel' . $n . '_rang'] = isset($r['rang']) ? (int) $r['rang'] : 50;
     }
+    // Fahrplaner, global
+    $w['plan_budget'] = (float) $cfg['budget_kw'];
+    $w['plan_last'] = isset($st['planlast']) ? (float) $st['planlast'] : 0.0;
+    $w['plan_pv'] = (isset($st['pv_summe']) && $st['pv_summe'] !== null) ? (float) $st['pv_summe'] : 0.0;
+    $w['plan_soc'] = (isset($st['soc']) && $st['soc'] !== null) ? (float) $st['soc'] : -1;
     $modus = (string) $cfg['profil_ein'];
     if ($modus === 'absolut' || $modus === 'beides') {
         for ($h = 0; $h < 24; $h++) {

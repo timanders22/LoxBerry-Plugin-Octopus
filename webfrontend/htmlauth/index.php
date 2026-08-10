@@ -38,6 +38,16 @@ if ($oc_p['home'] && file_exists($oc_p['home'] . '/libs/phplib/loxberry_system.p
 
 $oc_gespeichert = false;
 $oc_fehler      = array();   // alle Beanstandungen sammeln, nicht nur die letzte
+/* Die erlaubten Werte des Fristfeldes: -1 fuer "keine Frist" und die
+ * Stunden 0 bis 23. Als Text, weil das Formular Text liefert. */
+$oc_stunden_wahl = array_merge(array('-1'), array_map('strval', range(0, 23)));
+/* Ausgabe des Planer-Selbsttests. Er rechnet nur, spricht mit niemandem und
+ * braucht keine Preise - deshalb ein einfacher Knopf ohne Nebenwirkung. */
+$oc_plantest = '';
+if ($_SERVER['REQUEST_METHOD'] === 'POST' && isset($_POST['plantest'])) {
+    list($oc_pt_n, $oc_pt_f, $oc_plantest) = plan_selbsttest();
+    $oc_tab = 'tab-test';
+}
 $oc_hinweis     = '';
 $oc_test_titel  = '';
 $oc_test_text   = '';
@@ -164,7 +174,51 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST' && isset($_POST['save'])) {
             'schwelle' => max(-100, min(200, (float) str_replace(',', '.', (string) $oc_r('r_schwelle', 20)))),
             'prozent' => max(0, min(90, (int) $oc_r('r_prozent', 20))),
             'neg' => (int) $oc_r('r_neg', 0) ? 1 : 0,
+            // ---- Fahrplaner ----
+            'rang' => max(1, min(99, (int) $oc_r('r_rang', 50))),
+            'leistung' => max(0, min(100, (float) str_replace(',', '.', (string) $oc_r('r_leistung', 0)))),
+            'energie' => max(0, min(500, (float) str_replace(',', '.', (string) $oc_r('r_energie', 0)))),
+            'frist' => in_array((string) $oc_r('r_frist', '-1'), $oc_stunden_wahl, true)
+                       ? (int) $oc_r('r_frist', -1) : -1,
+            'pv_sperre' => max(0, min(500, (float) str_replace(',', '.', (string) $oc_r('r_pv_sperre', 0)))),
+            'soc_min' => max(0, min(100, (int) $oc_r('r_soc_min', 0))),
+            'soc_max' => max(0, min(100, (int) $oc_r('r_soc_max', 0))),
         );
+        $oc_rw = $oc_neu['regeln'][$oc_i];
+        if ($oc_rw['aktiv'] && $oc_rw['energie'] > 0 && $oc_rw['leistung'] <= 0) {
+            $oc_fehler[] = sprintf(oc_t('REGEL.FEHLER_ENERGIE_OHNE_LEISTUNG'), $oc_i + 1);
+        }
+        if ($oc_rw['soc_min'] > 0 && $oc_rw['soc_max'] > 0
+            && $oc_rw['soc_min'] >= $oc_rw['soc_max']) {
+            $oc_fehler[] = sprintf(oc_t('REGEL.FEHLER_SOC_REIHE'), $oc_i + 1);
+        }
+    }
+    // ---- Fahrplaner, global ----
+    $oc_neu['budget_kw'] = max(0, min(200, (float) str_replace(',', '.', (string) (isset($_POST['budget_kw']) ? $_POST['budget_kw'] : 0))));
+    $oc_neu['pv_bonus'] = max(0, min(100, (float) str_replace(',', '.', (string) (isset($_POST['pv_bonus']) ? $_POST['pv_bonus'] : 0))));
+    $oc_neu['pv_schwelle'] = max(1, min(100000, (int) (isset($_POST['pv_schwelle']) ? $_POST['pv_schwelle'] : 500)));
+    $oc_q = (string) (isset($_POST['pv_quelle']) ? $_POST['pv_quelle'] : '');
+    $oc_neu['pv_quelle'] = in_array($oc_q, array('', 'forecast_solar', 'objekt', 'liste'), true) ? $oc_q : '';
+    $oc_eh = (string) (isset($_POST['pv_einheit']) ? $_POST['pv_einheit'] : 'wh');
+    $oc_neu['pv_einheit'] = in_array($oc_eh, array('wh', 'w', 'kw'), true) ? $oc_eh : 'wh';
+    foreach (array('pv_url', 'pv_pfad', 'pv_zeitfeld', 'pv_wertfeld', 'soc_url', 'soc_pfad') as $oc_f2) {
+        // Nur Steuerzeichen und Anfuehrungszeichen raus - ein hartes Filtern
+        // zerstoert eingefuegte Adressen.
+        $oc_neu[$oc_f2] = trim(preg_replace('/[\x00-\x1F\x7F"\']/', '',
+            (string) (isset($_POST[$oc_f2]) ? $_POST[$oc_f2] : '')));
+    }
+    foreach (array('pv_url', 'soc_url') as $oc_f2) {
+        if ($oc_neu[$oc_f2] !== '' && !preg_match('#^https?://#i', $oc_neu[$oc_f2])) {
+            $oc_fehler[] = sprintf(oc_t('PLAN.FEHLER_URL'), oc_t('PLAN.L_' . strtoupper($oc_f2)));
+        }
+    }
+    if ($oc_neu['pv_quelle'] === 'liste'
+        && ($oc_neu['pv_zeitfeld'] === '' || $oc_neu['pv_wertfeld'] === '')) {
+        $oc_fehler[] = oc_t('PLAN.FEHLER_FELDNAMEN');
+    }
+    if ($oc_neu['pv_quelle'] !== '' && $oc_neu['pv_quelle'] !== 'forecast_solar'
+        && $oc_neu['pv_pfad'] === '') {
+        $oc_fehler[] = oc_t('PLAN.FEHLER_PFAD');
     }
     if ($oc_neu['cheap'] >= $oc_neu['expensive']) {
         $oc_fehler[] = oc_t('MELDUNG.SCHWELLEN');
@@ -609,6 +663,70 @@ $oc_reiter = array(
   </div>
 </div>
 
+<h2><?php echo oc_t('PLAN.H_TITEL'); ?></h2>
+<div class="sm-hinweis"><?php echo oc_t('PLAN.ERKLAERUNG'); ?></div>
+<div class="sm-row">
+  <div><label><?php echo oc_t('PLAN.L_BUDGET_KW'); ?></label>
+    <input data-role="none" type="text" name="budget_kw" value="<?php echo oc_e($oc_cfg['budget_kw']); ?>" placeholder="0">
+    <div class="sm-hilfe"><?php echo oc_t('PLAN.H_BUDGET_KW'); ?></div></div>
+  <div><label><?php echo oc_t('PLAN.L_PV_BONUS'); ?></label>
+    <input data-role="none" type="text" name="pv_bonus" value="<?php echo oc_e($oc_cfg['pv_bonus']); ?>" placeholder="0">
+    <div class="sm-hilfe"><?php echo oc_t('PLAN.H_PV_BONUS'); ?></div></div>
+  <div><label><?php echo oc_t('PLAN.L_PV_SCHWELLE'); ?></label>
+    <input data-role="none" type="number" name="pv_schwelle" value="<?php echo (int) $oc_cfg['pv_schwelle']; ?>" min="1" max="100000">
+    <div class="sm-hilfe"><?php echo oc_t('PLAN.H_PV_SCHWELLE'); ?></div></div>
+</div>
+<div class="sm-row">
+  <div><label><?php echo oc_t('PLAN.L_PV_QUELLE'); ?></label>
+    <select data-role="none" name="pv_quelle">
+<?php foreach (array('', 'forecast_solar', 'objekt', 'liste') as $oc_q2) { ?>
+      <option value="<?php echo oc_e($oc_q2); ?>"<?php echo $oc_cfg['pv_quelle'] === $oc_q2 ? ' selected' : ''; ?>><?php echo oc_e(oc_t('PLAN.QUELLE_' . ($oc_q2 === '' ? 'AUS' : strtoupper($oc_q2)))); ?></option>
+<?php } ?>
+    </select></div>
+  <div><label><?php echo oc_t('PLAN.L_PV_URL'); ?></label>
+    <input data-role="none" type="text" name="pv_url" value="<?php echo oc_e($oc_cfg['pv_url']); ?>" placeholder="https://api.forecast.solar/estimate/...">
+    <div class="sm-hilfe"><?php echo oc_t('PLAN.H_PV_URL'); ?></div></div>
+  <div><label><?php echo oc_t('PLAN.L_PV_EINHEIT'); ?></label>
+    <select data-role="none" name="pv_einheit">
+<?php foreach (array('wh', 'w', 'kw') as $oc_e4) { ?>
+      <option value="<?php echo $oc_e4; ?>"<?php echo $oc_cfg['pv_einheit'] === $oc_e4 ? ' selected' : ''; ?>><?php echo oc_e(oc_t('PLAN.EINHEIT_' . strtoupper($oc_e4))); ?></option>
+<?php } ?>
+    </select>
+    <div class="sm-hilfe"><?php echo oc_t('PLAN.H_PV_EINHEIT'); ?></div></div>
+</div>
+<div class="sm-row">
+  <div><label><?php echo oc_t('PLAN.L_PV_PFAD'); ?></label>
+    <input data-role="none" type="text" name="pv_pfad" value="<?php echo oc_e($oc_cfg['pv_pfad']); ?>" placeholder="forecasts">
+    <div class="sm-hilfe"><?php echo oc_t('PLAN.H_PV_PFAD'); ?></div></div>
+  <div><label><?php echo oc_t('PLAN.L_PV_ZEITFELD'); ?></label>
+    <input data-role="none" type="text" name="pv_zeitfeld" value="<?php echo oc_e($oc_cfg['pv_zeitfeld']); ?>" placeholder="period_end"></div>
+  <div><label><?php echo oc_t('PLAN.L_PV_WERTFELD'); ?></label>
+    <input data-role="none" type="text" name="pv_wertfeld" value="<?php echo oc_e($oc_cfg['pv_wertfeld']); ?>" placeholder="pv_estimate">
+    <div class="sm-hilfe"><?php echo oc_t('PLAN.H_PV_FELDER'); ?></div></div>
+</div>
+<div class="sm-row">
+  <div><label><?php echo oc_t('PLAN.L_SOC_URL'); ?></label>
+    <input data-role="none" type="text" name="soc_url" value="<?php echo oc_e($oc_cfg['soc_url']); ?>" placeholder="http://loxberry/plugins/...">
+    <div class="sm-hilfe"><?php echo oc_t('PLAN.H_SOC_URL'); ?></div></div>
+  <div><label><?php echo oc_t('PLAN.L_SOC_PFAD'); ?></label>
+    <input data-role="none" type="text" name="soc_pfad" value="<?php echo oc_e($oc_cfg['soc_pfad']); ?>" placeholder="geraete.1.soc">
+    <div class="sm-hilfe"><?php echo oc_t('PLAN.H_SOC_PFAD'); ?></div></div>
+</div>
+<?php $oc_umw = oc_umwelt();
+if ($oc_cfg['pv_quelle'] !== '' || $oc_cfg['soc_url'] !== '') { ?>
+<div class="sm-hinweis">
+  <?php echo sprintf(oc_e(oc_t('PLAN.STAND')),
+      $oc_umw['pv_summe'] === null ? '&ndash;' : oc_num($oc_umw['pv_summe'], 1),
+      $oc_umw['soc'] === null ? '&ndash;' : oc_num($oc_umw['soc'], 0)); ?>
+<?php if (!empty($oc_umw['pv_meldung'])) { ?>
+  <br>PV: <?php echo oc_e(oc_t('PLANMELD.' . $oc_umw['pv_meldung'])); ?>
+<?php } ?>
+<?php if (!empty($oc_umw['soc_meldung'])) { ?>
+  <br><?php echo oc_t('PLAN.SPEICHER'); ?>: <?php echo oc_e(oc_t('PLANMELD.' . $oc_umw['soc_meldung'])); ?>
+<?php } ?>
+</div>
+<?php } ?>
+
 <h2><?php echo oc_t('REGEL.H_TITEL'); ?></h2>
 <div class="sm-hinweis"><?php echo oc_t('REGEL.ERKLAERUNG'); ?></div>
 <?php for ($oc_i = 0; $oc_i < OC_REGELN; $oc_i++) {
@@ -643,6 +761,35 @@ $oc_reiter = array(
       <input data-role="none" type="number" name="r_bis[<?php echo $oc_i; ?>]" value="<?php echo (int) $oc_rr['bis']; ?>" min="0" max="23"></div>
     <div><label><?php echo oc_t('REGEL.L_HORIZONT'); ?></label>
       <input data-role="none" type="number" name="r_horizont[<?php echo $oc_i; ?>]" value="<?php echo (int) $oc_rr['horizont']; ?>" min="1" max="48"></div>
+    <div><label><?php echo oc_t('REGEL.L_FRIST'); ?></label>
+      <select data-role="none" name="r_frist[<?php echo $oc_i; ?>]">
+        <option value="-1"<?php echo (int) $oc_rr['frist'] < 0 ? ' selected' : ''; ?>><?php echo oc_t('REGEL.FRIST_KEINE'); ?></option>
+<?php for ($oc_h = 0; $oc_h < 24; $oc_h++) { ?>
+        <option value="<?php echo $oc_h; ?>"<?php echo (int) $oc_rr['frist'] === $oc_h ? ' selected' : ''; ?>><?php echo sprintf('%02d:00', $oc_h); ?></option>
+<?php } ?>
+      </select>
+      <div class="sm-hilfe"><?php echo oc_t('REGEL.H_FRIST'); ?></div></div>
+  </div>
+  <div class="sm-row">
+    <div><label><?php echo oc_t('REGEL.L_RANG'); ?></label>
+      <input data-role="none" type="number" name="r_rang[<?php echo $oc_i; ?>]" value="<?php echo (int) $oc_rr['rang']; ?>" min="1" max="99">
+      <div class="sm-hilfe"><?php echo oc_t('REGEL.H_RANG'); ?></div></div>
+    <div><label><?php echo oc_t('REGEL.L_LEISTUNG'); ?></label>
+      <input data-role="none" type="text" name="r_leistung[<?php echo $oc_i; ?>]" value="<?php echo oc_e($oc_rr['leistung']); ?>" placeholder="0">
+      <div class="sm-hilfe"><?php echo oc_t('REGEL.H_LEISTUNG'); ?></div></div>
+    <div><label><?php echo oc_t('REGEL.L_ENERGIE'); ?></label>
+      <input data-role="none" type="text" name="r_energie[<?php echo $oc_i; ?>]" value="<?php echo oc_e($oc_rr['energie']); ?>" placeholder="0">
+      <div class="sm-hilfe"><?php echo oc_t('REGEL.H_ENERGIE'); ?></div></div>
+  </div>
+  <div class="sm-row">
+    <div><label><?php echo oc_t('REGEL.L_PV_SPERRE'); ?></label>
+      <input data-role="none" type="text" name="r_pv_sperre[<?php echo $oc_i; ?>]" value="<?php echo oc_e($oc_rr['pv_sperre']); ?>" placeholder="0">
+      <div class="sm-hilfe"><?php echo oc_t('REGEL.H_PV_SPERRE'); ?></div></div>
+    <div><label><?php echo oc_t('REGEL.L_SOC_MIN'); ?></label>
+      <input data-role="none" type="number" name="r_soc_min[<?php echo $oc_i; ?>]" value="<?php echo (int) $oc_rr['soc_min']; ?>" min="0" max="100"></div>
+    <div><label><?php echo oc_t('REGEL.L_SOC_MAX'); ?></label>
+      <input data-role="none" type="number" name="r_soc_max[<?php echo $oc_i; ?>]" value="<?php echo (int) $oc_rr['soc_max']; ?>" min="0" max="100">
+      <div class="sm-hilfe"><?php echo oc_t('REGEL.H_SOC'); ?></div></div>
   </div>
   <label style="display:inline-flex;align-items:center;gap:8px;">
     <input data-role="none" type="checkbox" name="r_neg[<?php echo $oc_i; ?>]" value="1" <?php echo !empty($oc_rr['neg']) ? 'checked' : ''; ?>>
@@ -1068,6 +1215,72 @@ foreach (array_reverse($oc_hist) as $oc_r) { ?>
 <!-- ==================== Reiter: Test ==================== -->
 <div class="sm-seite<?php echo $oc_tab === 'tab-test' ? ' sm-active' : ''; ?>" id="tab-test">
 <h2><?php echo oc_t('TEST.H_PRUEFUNG'); ?></h2>
+
+<h3 class="sm-h3"><?php echo oc_t('PLAN.H_FAHRPLAN'); ?></h3>
+<p class="sm-small"><?php echo oc_t('PLAN.FAHRPLAN_TEXT'); ?></p>
+<?php
+$oc_fp = oc_fahrplan();
+$oc_bel = $oc_fp['belegung'];
+$oc_sl = (int) $oc_fp['slotlen'];
+$oc_aktiv = array();
+foreach ($oc_fp['plan'] as $oc_pz) {
+    if (!empty($oc_pz['slots'])) { $oc_aktiv[] = $oc_pz; }
+}
+/* Nur die Scheiben zeigen, in denen ueberhaupt etwas geplant ist - eine
+ * Tabelle mit 96 Zeilen, von denen 90 leer sind, liest niemand. Gedeckelt
+ * bei 60 Zeilen; mehr passt auf keinen Bildschirm. */
+$oc_zeiten = array_keys($oc_bel);
+foreach ($oc_aktiv as $oc_pz) {
+    foreach ($oc_pz['slots'] as $oc_ts) { $oc_zeiten[] = $oc_ts; }
+}
+$oc_zeiten = array_values(array_unique($oc_zeiten));
+sort($oc_zeiten);
+$oc_zeiten = array_slice($oc_zeiten, 0, 60);
+$oc_budget = (float) $oc_cfg['budget_kw'];
+?>
+<?php if (!$oc_zeiten) { ?>
+<div class="sm-hinweis"><?php echo oc_t('PLAN.FAHRPLAN_LEER'); ?></div>
+<?php } else { ?>
+<table class="sm-tbl">
+<tr><th><?php echo oc_t('PLAN.T_ZEIT'); ?></th><th><?php echo oc_t('PLAN.T_PREIS'); ?></th>
+<?php foreach ($oc_aktiv as $oc_pz) { ?>
+    <th><?php echo oc_e($oc_pz['name']); ?></th>
+<?php } ?>
+    <th><?php echo oc_t('PLAN.T_SUMME'); ?></th></tr>
+<?php foreach ($oc_zeiten as $oc_ts) {
+    $oc_kw = isset($oc_bel[$oc_ts]) ? (float) $oc_bel[$oc_ts] : 0.0;
+    $oc_voll = ($oc_budget > 0 && round($oc_kw, 4) >= round($oc_budget, 4));
+?>
+<tr<?php echo $oc_voll ? ' style="background:#fdf4ec;"' : ''; ?>>
+    <td><span class="sm-mono"><?php echo date($oc_sl >= 3600 ? 'd.m. H:i' : 'd.m. H:i', $oc_ts); ?></span></td>
+    <td><?php echo isset($oc_fp['preise'][$oc_ts])
+        ? oc_num($oc_fp['preise'][$oc_ts], 2) : '&ndash;'; ?></td>
+<?php foreach ($oc_aktiv as $oc_pz) { ?>
+    <td style="text-align:center;"><?php echo in_array($oc_ts, $oc_pz['slots'], true)
+        ? '<span class="sm-an">&#9632;</span>' : '&middot;'; ?></td>
+<?php } ?>
+    <td><?php echo $oc_kw > 0 ? oc_num($oc_kw, 2) . ' kW' : '&ndash;'; ?></td></tr>
+<?php } ?>
+</table>
+<?php if ($oc_budget > 0) { ?>
+<p class="sm-small"><?php echo oc_t('PLAN.FAHRPLAN_BUDGET'); ?></p>
+<?php } } ?>
+
+<h3 class="sm-h3"><?php echo oc_t('PLAN.H_SELBSTTEST'); ?></h3>
+<p class="sm-small"><?php echo oc_t('PLAN.SELBSTTEST_TEXT'); ?></p>
+<div class="sm-legende">
+<span><i class="sm-punkt sm-b-technik"></i> <?php echo oc_t('PLAN.LEGENDE_TECHNIK'); ?></span>
+</div>
+<div class="sm-knopfreihe">
+  <form action="index.php" method="post">
+    <input data-role="none" type="hidden" name="activetab" value="tab-test">
+    <input data-role="none" type="hidden" name="tab" value="test">
+    <button data-role="none" class="sm-btn sm-b-technik" type="submit" name="plantest" value="1"><?php echo oc_t('PLAN.K_SELBSTTEST'); ?></button>
+  </form>
+</div>
+<?php if (!empty($oc_plantest)) { ?>
+<div class="sm-pre"><?php echo oc_e($oc_plantest); ?></div>
+<?php } ?>
 <div class="sm-legende">
 <span><i class="sm-punkt sm-b-lesen"></i> <?php echo oc_t('LEGENDE.LESEN'); ?></span>
 <span><i class="sm-punkt sm-b-technik"></i> <?php echo oc_t('LEGENDE.TECHNIK'); ?></span>
