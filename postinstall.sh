@@ -15,7 +15,10 @@ ARGV5=$5
 PFOLDER="${ARGV3:-octopus}"
 BASE="${ARGV5:-$LBHOMEDIR}"
 if [ -z "$BASE" ] || [ ! -d "$BASE" ]; then
-    BASE=/opt/loxberry
+    # Kein fest verdrahteter Systempfad: aus dem eigenen Ablageort ableiten.
+    # Dieses Skript liegt im Wurzelverzeichnis des Plugin-Archivs bzw. unter
+    # <home>/data/plugins/<ordner>/.
+    BASE=$(cd "$(dirname "$(readlink -f "$0")")/../../.." 2>/dev/null && pwd)
 fi
 
 CFGDIR="$BASE/config/plugins/$PFOLDER"

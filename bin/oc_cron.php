@@ -22,7 +22,7 @@ $oc_lib = 'REPLACELBPHTMLDIR/oc_lib.php';
 if (!is_file($oc_lib)) {
     $oc_home = getenv('LBHOMEDIR');
     if (!$oc_home || !is_dir($oc_home)) {
-        foreach (array('/opt/loxberry', '/home/loxberry/loxberry') as $k) {
+        foreach (array(lb_wurzel_ermitteln(), '/home/loxberry/loxberry') as $k) {
             if (is_dir($k)) { $oc_home = $k; break; }
         }
     }
@@ -142,3 +142,32 @@ if (rand(0, 60) === 0) {
 }
 
 echo "OK\n";
+
+
+/* Den LoxBerry-Wurzelordner ohne festen Systempfad bestimmen.
+ *
+ * Vom eigenen Ablageort aufwaerts, bis ein Verzeichnis gefunden ist, das
+ * config/plugins UND webfrontend enthaelt. Das trifft die uebliche
+ * Installation genauso wie eine an einem anderen Ort - und es trifft auch
+ * den Fall, dass das Plugin noch als entpacktes Archiv daliegt (dann findet
+ * es nichts und gibt einen Leerstring zurueck, was der Aufrufer ohnehin
+ * abfangen muss).
+ *
+ * Der Name traegt kein Plugin-Kuerzel und ist deshalb abgesichert: zwei
+ * Bibliotheken landen nie im selben Prozess, aber die Pruefung kostet nichts.
+ */
+if (!function_exists('lb_wurzel_ermitteln')) {
+    function lb_wurzel_ermitteln()
+    {
+        $d = __DIR__;
+        for ($i = 0; $i < 8; $i++) {
+            if (is_dir($d . '/config/plugins') && is_dir($d . '/webfrontend')) {
+                return $d;
+            }
+            $eltern = dirname($d);
+            if ($eltern === $d) { break; }
+            $d = $eltern;
+        }
+        return '';
+    }
+}
