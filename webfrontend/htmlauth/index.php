@@ -476,6 +476,13 @@ if ($oc_rahmen) {
 .sm-monate input { padding: 6px 8px; font-size: 0.9em; text-align: right; }
 .sm-demo { border: 1px solid #b39ddb; background: #f3e5f5; border-radius: 6px;
     padding: 10px 12px; margin: 12px 0; font-size: 0.92em; }
+
+/* Nachgetragene Definitionen (CSS-Luecken-Durchgang 13.08.2026):
+   benutzt, aber nie definiert - wortgleich aus der Hausstandard-Vorlage. */
+.sm-h3 { color: #4f7d17; font-size: 1.0em; font-weight: 700; margin: 16px 0 2px; }
+.sm-row { display: flex; gap: 12px; }
+.sm-row > div { flex: 1; }
+.sm-small { font-size: 0.88em; color: #555; }
 </style>
 <div class="sm-wrap">
 
