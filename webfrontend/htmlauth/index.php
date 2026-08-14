@@ -252,16 +252,9 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST' && isset($_POST['save'])) {
         ? (int) round($oc_msum)
         : $oc_g('consumption', 3500, 100, 100000);
 
-    $oc_neu['mqtt_enabled'] = isset($_POST['mqtt_enabled']) ? 1 : 0;
-    $oc_prae = preg_replace('#[^A-Za-z0-9_/-]#', '',
-        trim((string) (isset($_POST['mqtt_topic']) ? $_POST['mqtt_topic'] : '')));
-    if ($oc_prae === '') {
-        if (trim((string) (isset($_POST['mqtt_topic']) ? $_POST['mqtt_topic'] : '')) !== '') {
-            $oc_fehler[] = oc_t('MELDUNG.TOPIC_UNGUELTIG');
-        }
-        $oc_prae = 'octopus';
-    }
-    $oc_neu['mqtt_topic'] = $oc_prae;
+    /* mqtt_enabled und mqtt_topic werden hier NICHT mehr angefasst: sie
+     * wohnen im Reiter MQTT und haben dort ein eigenes Formular.
+     * $oc_neu kommt aus $oc_cfg, die Werte ueberleben unveraendert. */
 
     // Token einmal erzeugen und behalten. Wer es neu wuerfelt, muss die
     // Adressen im Miniserver anpassen - deshalb nur auf ausdruecklichen Wunsch.
@@ -312,6 +305,32 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST' && isset($_POST['save'])) {
     } else {
         $oc_fehler[] = str_replace('%F%', oc_e($oc_p['config']), oc_t('MELDUNG.SPEICHERN_FEHLER'));
     }
+}
+
+/* ---------------- MQTT (eigener Reiter, eigenes Formular) ----------------
+ *
+ * Eigenes Formular UND eigener Handler gehoeren zusammen. Loesten beide
+ * Formulare denselben Handler aus, setzte dieser die Haken des jeweils
+ * nicht abgeschickten Formulars per isset() auf 0. */
+if ($_SERVER['REQUEST_METHOD'] === 'POST' && isset($_POST['save_mqtt'])) {
+    $oc_mcfg = oc_config();
+    $oc_mcfg['mqtt_enabled'] = isset($_POST['mqtt_enabled']) ? 1 : 0;
+    $oc_mprae = preg_replace('#[^A-Za-z0-9_/-]#', '',
+        trim((string) (isset($_POST['mqtt_topic']) ? $_POST['mqtt_topic'] : '')));
+    if ($oc_mprae === '') {
+        if (trim((string) (isset($_POST['mqtt_topic']) ? $_POST['mqtt_topic'] : '')) !== '') {
+            $oc_fehler[] = oc_t('MELDUNG.TOPIC_UNGUELTIG');
+        }
+        $oc_mprae = 'octopus';
+    }
+    $oc_mcfg['mqtt_topic'] = $oc_mprae;
+    if (!$oc_fehler) {
+        if (oc_config_write($oc_mcfg)) {
+            $oc_hinweis = oc_t('MELDUNG.GESPEICHERT');
+            $oc_cfg = oc_config();
+        }
+    }
+    $oc_tab = 'tab-mqtt';
 }
 
 /* ================= Anzeige vorbereiten ================= */
@@ -725,9 +744,13 @@ $oc_reiter = array(
 <?php $oc_umw = oc_umwelt();
 if ($oc_cfg['pv_quelle'] !== '' || $oc_cfg['soc_url'] !== '') { ?>
 <div class="sm-hinweis">
-  <?php echo sprintf(oc_e(oc_t('PLAN.STAND')),
-      $oc_umw['pv_summe'] === null ? '&ndash;' : oc_num($oc_umw['pv_summe'], 1),
-      $oc_umw['soc'] === null ? '&ndash;' : oc_num($oc_umw['soc'], 0)); ?>
+  <?php /* Ohne oc_e(): der Text enthaelt absichtlich <b>-Auszeichnung. Mit
+           Maskierung stand hier woertlich "<b>" auf der Seite. Die beiden
+           eingesetzten Werte sind unbedenklich - oc_num() liefert eine
+           formatierte Zahl, sonst steht dort ein Gedankenstrich. */
+        echo sprintf(oc_t('PLAN.STAND'),
+      $oc_umw['pv_summe'] === null ? '–' : oc_num($oc_umw['pv_summe'], 1),
+      $oc_umw['soc'] === null ? '–' : oc_num($oc_umw['soc'], 0)); ?>
 <?php if (!empty($oc_umw['pv_meldung'])) { ?>
   <br>PV: <?php echo oc_e(oc_t('PLANMELD.' . $oc_umw['pv_meldung'])); ?>
 <?php } ?>
@@ -905,19 +928,8 @@ if ($oc_cfg['pv_quelle'] !== '' || $oc_cfg['soc_url'] !== '') { ?>
   <div class="sm-hilfe"><?php echo oc_t('EINST.TTS_TEMPLATE_HILFE'); ?></div>
 </div>
 
-<h2><?php echo oc_t('EINST.H_MQTT'); ?></h2>
-<label style="display:inline-flex;align-items:center;gap:6px;font-weight:600;">
-  <input data-role="none" type="checkbox" name="mqtt_enabled" <?php echo !empty($oc_cfg['mqtt_enabled']) ? 'checked' : ''; ?>>
-  <?php echo oc_t('EINST.MQTT_AN'); ?>
-</label>
-<div class="sm-reihe">
-  <div>
-    <label><?php echo oc_t('EINST.MQTT_TOPIC'); ?></label>
-    <input data-role="none" type="text" name="mqtt_topic" value="<?php echo oc_e($oc_cfg['mqtt_topic']); ?>" placeholder="octopus">
-    <div class="sm-hilfe"><?php echo oc_t('EINST.MQTT_TOPIC_HILFE'); ?></div>
-  </div>
-  <div></div><div></div>
-</div>
+<?php /* MQTT stand hier bis zu dieser Fassung. Es wohnt jetzt
+         vollstaendig im Reiter MQTT - eine Sache, eine Stelle. */ ?>
 
 <h2><?php echo oc_t('EINST.H_TOKEN'); ?></h2>
 <div class="sm-hilfe"><?php echo oc_t('EINST.TOKEN_HILFE'); ?></div>
@@ -1000,6 +1012,29 @@ for ($oc_i = 0; $oc_i < 12; $oc_i++) { ?>
 
 <!-- ==================== Reiter: MQTT ==================== -->
 <div class="sm-seite<?php echo $oc_tab === 'tab-mqtt' ? ' sm-active' : ''; ?>" id="tab-mqtt">
+
+<h2>MQTT</h2>
+<form action="index.php" method="post">
+<input data-role="none" type="hidden" name="save_mqtt" value="1">
+<input data-role="none" type="hidden" name="activetab" value="tab-mqtt">
+<h2><?php echo oc_t('EINST.H_MQTT'); ?></h2>
+<label style="display:inline-flex;align-items:center;gap:6px;font-weight:600;">
+  <input data-role="none" type="checkbox" name="mqtt_enabled" <?php echo !empty($oc_cfg['mqtt_enabled']) ? 'checked' : ''; ?>>
+  <?php echo oc_t('EINST.MQTT_AN'); ?>
+</label>
+<div class="sm-reihe">
+  <div>
+    <label><?php echo oc_t('EINST.MQTT_TOPIC'); ?></label>
+    <input data-role="none" type="text" name="mqtt_topic" value="<?php echo oc_e($oc_cfg['mqtt_topic']); ?>" placeholder="octopus">
+    <div class="sm-hilfe"><?php echo oc_t('EINST.MQTT_TOPIC_HILFE'); ?></div>
+  </div>
+  <div></div><div></div>
+</div>
+<div class="sm-legende"><span><i class="sm-punkt sm-b-aktion"></i> <?php echo oc_t('LEGENDE.AKTION'); ?></span></div>
+<div class="sm-knopfreihe">
+  <button data-role="none" class="sm-btn sm-b-aktion" type="submit"><?php echo oc_t('ALLGEMEIN.SPEICHERN'); ?></button>
+</div>
+</form>
 <h2><?php echo oc_t('MQTT.H_ZUSTAND'); ?></h2>
 <div class="sm-hinweis"><?php echo oc_t('MQTT.GATEWAY_ERKLAERUNG'); ?></div>
 <table class="sm-tbl">
